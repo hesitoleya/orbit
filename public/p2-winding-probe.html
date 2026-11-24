@@ -1,0 +1,23 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>P2 winding probe</title></head><body><h1>P2 WebGL 绕序隔离探针</h1><pre id="result">运行中</pre><canvas id="canvas" width="64" height="64"></canvas><script>
+'use strict';
+(function(){
+  const out=document.getElementById('result'), canvas=document.getElementById('canvas');
+  try {
+    const gl=canvas.getContext('webgl2',{antialias:false,preserveDrawingBuffer:true});
+    if(!gl) throw Error('WebGL2 不可用');
+    function shader(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s;}
+    const p=gl.createProgram();
+    gl.attachShader(p,shader(gl.VERTEX_SHADER,'#version 300 es\nin vec2 p;uniform float flip;void main(){gl_Position=vec4(p.x*flip,p.y,0.,1.);}'));
+    gl.attachShader(p,shader(gl.FRAGMENT_SHADER,'#version 300 es\nprecision mediump float;out vec4 color;void main(){color=vec4(1.,0.,0.,1.);}'));
+    gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(p));gl.useProgram(p);
+    const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-0.8,-0.8,0.8,-0.8,0,0.8]),gl.STATIC_DRAW);
+    const loc=gl.getAttribLocation(p,'p');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+    gl.viewport(0,0,64,64);gl.disable(gl.BLEND);gl.enable(gl.CULL_FACE);gl.cullFace(gl.BACK);
+    function trial(flip,face){gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);gl.frontFace(face);gl.uniform1f(gl.getUniformLocation(p,'flip'),flip);gl.drawArrays(gl.TRIANGLES,0,3);const px=new Uint8Array(4);gl.readPixels(32,32,1,1,gl.RGBA,gl.UNSIGNED_BYTE,px);const err=gl.getError();return {pixel:Array.from(px),error:err};}
+    const normal=trial(1,gl.CCW), reflected=trial(-1,gl.CCW), corrected=trial(-1,gl.CW);
+    const pass=normal.pixel[0]>200 && reflected.pixel[0]===0 && corrected.pixel[0]>200 && [normal,reflected,corrected].every(x=>x.error===gl.NO_ERROR);
+    out.textContent=JSON.stringify({status:pass?'PASS':'FAIL',normal,reflected,corrected,renderer:gl.getParameter(gl.RENDERER),note:'单三角形、WebGL2、无后处理；不代表项目渲染或性能'},null,2);
+    document.body.dataset.status=pass?'pass':'fail';
+  } catch(e) {out.textContent='ERROR: '+e.message;document.body.dataset.status='error';}
+})();
+</script></body></html>

@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>浏览器控制轻量探针</title></head>
+<body><h1>浏览器控制轻量探针</h1><p>无 WebGL、iframe 或远程资源，仅检查当前页面的基本控制。</p>
+<button id="probe" type="button">点击测试（未点击）</button>
+<script>
+'use strict';
+document.getElementById('probe').addEventListener('click', function () { this.textContent = '点击测试（已响应）'; });
+</script></body></html>

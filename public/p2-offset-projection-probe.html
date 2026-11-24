@@ -1,0 +1,18 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>P2 offset projection probe</title></head><body><h1>非对称投影 GPU 探针</h1><pre id="result">运行中</pre><script type="module">
+import * as THREE from './js/three.module.min.js';
+const out=document.querySelector('#result');
+try{
+ const r=new THREE.WebGLRenderer({antialias:false,preserveDrawingBuffer:true});r.setSize(96,96);r.setPixelRatio(1);r.setClearColor(0,1);document.body.appendChild(r.domElement);
+ const camera=new THREE.PerspectiveCamera(60,1,.1,100);camera.setViewOffset(192,192,25,10,120,160);camera.updateMatrixWorld(true);
+ const projection=camera.projectionMatrix.clone(), S=new THREE.Matrix4().makeScale(-1,1,1);
+ const scene=new THREE.Scene(),geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute([-.9,-.7,-4, .7,-.6,-4, -.3,.8,-4],3));
+ const material=new THREE.MeshBasicMaterial({color:0xff0000,side:THREE.DoubleSide,toneMapped:false}),mesh=new THREE.Mesh(geometry,material);scene.add(mesh);
+ const gl=r.getContext();
+ function capture(reflectGeometry,side){mesh.scale.x=reflectGeometry?-1:1;camera.projectionMatrix.copy(projection);if(side==='right')camera.projectionMatrix.multiply(S);if(side==='left')camera.projectionMatrix.premultiply(S);camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();r.render(scene,camera);const pixels=new Uint8Array(96*96*4);gl.readPixels(0,0,96,96,gl.RGBA,gl.UNSIGNED_BYTE,pixels);return {pixels,error:gl.getError()};}
+ const a=capture(false,'none'), b=capture(true,'right'), c=capture(true,'left');
+ function diff(x,y){let channels=0,sum=0;for(let i=0;i<x.length;i++){const d=Math.abs(x[i]-y[i]);if(d)channels++;sum+=d;}return {channels,mean:sum/x.length};}
+ const correct=diff(a.pixels,b.pixels),wrong=diff(a.pixels,c.pixels);const pass=correct.channels===0&&wrong.channels>0&&[a,b,c].every(x=>x.error===0);
+ out.textContent=JSON.stringify({status:pass?'PASS':'FAIL',revision:THREE.REVISION,correct,wrong,errors:[a.error,b.error,c.error],note:'非对称视锥、双面单三角形、RGBA8 单次比较；不代表生产渲染'},null,2);document.body.dataset.status=pass?'pass':'fail';
+ geometry.dispose();material.dispose();r.dispose();
+}catch(e){out.textContent='ERROR: '+e.message;document.body.dataset.status='error';}
+</script></body></html>

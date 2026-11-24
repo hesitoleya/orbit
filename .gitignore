@@ -1,0 +1,51 @@
+# ============================================================
+# SPACE·1:1 — 仓库只放源码与文档；数据、产物、实验残留不入库
+# 仓库体积预算：源码约 6 MB，docs 图片约 50 MB
+# ============================================================
+
+# ---- 依赖 ----
+node_modules/
+
+# ---- 大数据（3.3 GB：Cassini 原始包、纹理、星表、实拍）----
+data/
+public/data/
+
+# ---- 构建产物（单文件 400 MB × 3，可随时 node build.mjs 重建）----
+/space.html
+/index.html
+/space-http.html
+/nonprod-*.html
+
+# ---- 实验/验证页面（每个约 11 MB）----
+public/m82-*.html
+public/deep-quality-*.html
+
+# ---- 实验残留（tools 下多个 49 MB 的 UUID 目录）----
+tools/*candidate*/
+tools/p2-internal-fault-report-*/
+
+# ---- 源码备份（app.js.bak88 ~ bak149 共 30+ 份）----
+*.bak*
+
+# ---- 候选/预览大文件（每个 1.2 MB）----
+public/js/p2-*-preview*.js
+public/js/rh-candidate-preview*.js
+
+# ---- 临时探针与截图（根目录 _ 开头：_bh*.png / _ab*.json …）----
+/_*
+
+# ---- 系统与日志 ----
+.DS_Store
+Thumbs.db
+*.log
+
+# ---- 工具工作区（WorkBuddy 元数据/缓存/记忆，不入库）----
+.workbuddy/
+
+# ---- 工具工作区（WorkBuddy 元数据/缓存/记忆，不入库）----
+.workbuddy/
+
+# ---- Python 参考环境（虚拟环境，含 100 MB 的 ffmpeg 二进制）----
+tools/.reference-python/
+__pycache__/
+*.pyc

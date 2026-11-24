@@ -1,0 +1,16 @@
+'use strict';
+const fs=require('fs'),zlib=require('zlib'),crypto=require('crypto'),assert=require('assert/strict');
+const dir='.workbuddy/v208-roi/',r=JSON.parse(fs.readFileSync(dir+'report.json'));
+const gzip=fs.readFileSync(dir+'orion-roi-256.rgba8.bin.gz'),raw=zlib.gunzipSync(gzip);
+assert.equal(raw.length,256**3*4);assert.equal(raw.length,r.rawBytes);assert.equal(gzip.length,r.compressedBytes);
+assert.equal(crypto.createHash('sha256').update(raw).digest('hex'),r.rawSha256);assert.equal(crypto.createHash('sha256').update(gzip).digest('hex'),r.sha256);
+assert(r.voxelSpacing<r.coarseSpacing&&Math.abs(r.coarseSpacing/r.voxelSpacing-4)<1e-6);
+assert(Math.abs(2.6/r.voxelSpacing-1024)<1e-3);assert(r.nyquistCyclesPerLocalUnit>190);
+assert(Number.isFinite(r.renderLinearMAE)&&r.renderLinearMAE>0);assert(r.fineSigmaGradientMean>r.coarseSigmaGradientMean);
+const manifest=JSON.parse(fs.readFileSync('public/data/cinematic-nebula/manifest.json'));
+assert(!JSON.stringify(manifest).includes('orion-roi'));const original=manifest.profiles.find(p=>p.type===6);assert.equal(original.medium.dimensions[0],256);assert.equal(r.sourceMediumRawSha256,original.medium.rawSha256);
+assert(Number.isFinite(r.packedRenderMAE)&&r.packedRenderMAE<r.renderLinearMAE);assert(r.deployedVsCandidateMAE>0);assert(r.emissionClampedComponentFraction>=0&&r.emissionClampedComponentFraction<.00001);
+assert(r.comparisonReference.includes('Not the deployed'));assert(r.gradientUnits.includes('index-space'));
+assert(r.acceptance.includes('no GPU validation'));assert(r.license.includes('not measured'));
+console.log('PASS isolated ROI gzip/raw SHA, 64MiB byte budget, fourfold physical sampling density, nonzero transport comparison, original production manifest preserved');
+console.log('CPU comparison does not validate shadows, scattering, animation, GPU performance or cinematic quality.');

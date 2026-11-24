@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>RH v4 连续画面采证面板（非正式入口）</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#111820;color:#e4edf5;font:13px system-ui}
+header{padding:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{background:#264855;color:#fff;border:1px solid #4e8593;padding:8px;border-radius:5px}
+button:disabled{opacity:.4}#status{color:#9cdcd3}
+iframe{width:100%;height:calc(100vh - 220px);min-height:420px;border:0}
+pre{height:130px;margin:0;padding:8px;overflow:auto;white-space:pre-wrap;background:#17222d}
+small{display:block;padding:0 10px;color:#bac6d0}
+</style></head>
+<body>
+<header><b>隔离候选 v4 · 自然连续画面 v2</b>
+<button id="initialize" disabled>0 前台初始化候选</button><button id="record" disabled>1 自然连续录制</button><button id="json" disabled>下载报告 JSON</button><button id="video" disabled>下载视频 WebM</button>
+<span id="status">等待前台激活</span></header>
+<small>先将页面置于前台并初始化候选；启动后父页或候选隐藏即终止。candidateHold=0；不 seek。画布流来自同源候选 canvas，视频 PTS 与候选渲染帧不作严格同一时钟宣称。</small>
+<iframe id="scene" title="既有右手候选v4连续画面"></iframe><pre id="output" role="log" aria-label="采证报告"></pre>
+<script>
+'use strict';
+/* This inline controller is also executed verbatim by tools/test-rh-v4-continuity.cjs.
+ * It never edits the candidate; fetched byte identity is not proof of executed bytes. */
+const $ = id => document.getElementById(id), frame = $('scene');
+const CANDIDATE = '/rh-candidate-preview-v4.html?fresh=1&candidateHold=0&auto=0';
+const EXPECTED = Object.freeze({
+  '/rh-candidate-preview-v4.html': '5553489f3a0917ea195cd167f4cbbf02f8d0fa96d382f123feec24b78f0185e6',
+  '/js/rh-candidate-preview-v4.js': '89177e14d69390d935ba6c1a2c9c7fb03ab3f66e42ac9799ac2701839f2bedb7'
+});
+const report = {
+  schema: 2, harness: 'rh-v4-continuity-v2', candidate: 'existing-rh-v4',
+  startedAt: new Date().toISOString(), scope: 'isolated HTTP iframe only', status: 'waiting-foreground',
+  identity: null, steps: [], errors: [], telemetry: [], events: [], cleanup: [],
+  video: { captureFps: 30, mimeType: null, chunks: 0, bytes: null, startWall: null,
+    startMonotonicMs: null, stopWall: null, stopMonotonicMs: null, durationMs: null,
+    tracks: [], canvas: null, blobCreated: false, downloadName: null },
+  limits: { loadMs: 15000, identityMs: 10000, handoffMs: 25000, postHandoffMs: 6000,
+    stopMs: 5000, telemetryEntries: 2000, captureFps: 30 },
+  limitations: [
+    'not production space.html or space-http.html; no candidate rewrite',
+    'candidateHold=0 is configuration evidence, not proof of natural progression',
+    'fetched HTML/JS hashes plus module URL, not independent proof of executed bytes or cache contents',
+    'iframe startup errors before load are not observed; boot/identity checks do not prove no such errors',
+    'canvas captureStream frames are browser-captured canvas output, not every candidate rAF or GPU timestamp',
+    'MediaRecorder PTS begins at an encoder-dependent offset; state samples are not frame-exact bound to PTS',
+    'candidate main snapshot is captured before render; completed means CPU render returned, not GPU completion',
+    'last completed main snapshot, not same-physical-time handoff or finite-star parallax',
+    'seek wrapper counts public API calls only; closures or retained original functions are not observable',
+    'no production file entry, visual approval, full endpoints, reverse playback or second entry'
+  ]
+};
+let w = null, candidateDocument = null, booted = false, booting = false;
+let dead = false, finished = false, busy = false, phase = 'waiting-foreground', run = 0;
+let active = null, waitTimer = null, waitRaf = null, monitorTimer = null;
+let loadTimer = null, identityDeadline = null, budget = null;
+let observedSeekCalls = 0, originalSeek = null, seekWrapper = null;
+let recorder = null, videoStream = null, videoTrack = null, videoChunks = [];
+let videoBlob = null, videoURL = null;
+let loadStarted = null, loadDeadline = null, candidateStarted = false;
+const clone = value => value === undefined ? null : JSON.parse(JSON.stringify(value));
+const assert = (ok, message) => { if (!ok) throw Error(message); };
+function show() {
+  $('output').textContent = JSON.stringify(report, null, 2);
+  const label = report.status === 'ready' ? '1 自然连续录制'
+    : (report.status === 'failed' ? '1 失败：' + (report.errors.at(-1) ? report.errors.at(-1).message.slice(0, 42) : '未知')
+      : '1 状态：' + report.status);
+  if ($('record').disabled) $('record').textContent = label;
+}
+function recordStep(step, result) {
+  const snapshot = clone(result);
+  if (step !== 'failure-before-cleanup') {
+    assert(!dead, '失败终态禁止追加成功或诊断步骤');
+    if (!['deadline-exceeded', 'budget-expired'].includes(step))
+      assert(!budget || performance.now() < budget.deadline, '证据提交超过绝对截止时间');
+  }
+  report.steps.push({ step, at: new Date().toISOString(), result: snapshot });
+  $('status').textContent = step; show();
+}
+function lock() { $('record').disabled = true; }
+function offer(id) { lock(); if (!dead && !finished) $(id).disabled = false; }
+function liveEnvironment() {
+  return {
+    parentURL: location.href, iframeURL: w ? w.location.href : null,
+    parentVisibility: document.visibilityState, iframeVisibility: w ? w.document.visibilityState : null,
+    parentHasFocus: document.hasFocus(), iframeHasFocus: w ? w.document.hasFocus() : null,
+    viewport: w ? [w.innerWidth, w.innerHeight] : null, dpr: w ? w.devicePixelRatio : null,
+    serviceWorkerController: w && w.navigator.serviceWorker && w.navigator.serviceWorker.controller
+      ? w.navigator.serviceWorker.controller.scriptURL : null
+  };
+}
+function canvasInfo() {
+  if (!w || !candidateDocument) return null;
+  const list = Array.from(candidateDocument.querySelectorAll('#stage canvas'));
+  const canvas = list.length === 1 ? list[0] : null;
+  return { count: list.length, width: canvas ? canvas.width : null, height: canvas ? canvas.height : null,
+    cssWidth: canvas ? canvas.clientWidth : null, cssHeight: canvas ? canvas.clientHeight : null };
+}
+function state() {
+  const s = w.__SE, r = w.__RH_CANDIDATE__, cs = s.CS;
+  return clone({ environment: liveEnvironment(), journey: s.journeyInfo,
+    generation: r.generation, entry: r.entry, first: r.first, restores: r.restores.length, errors: r.errors,
+    upCur: cs.upCur ? cs.upCur.toArray() : null, ctxLost: s.ctxLost, canvas: canvasInfo(),
+    projection: cs.cam.projectionMatrix.toArray(), inverse: cs.cam.projectionMatrixInverse.toArray(),
+    seekCalls: observedSeekCalls, recorderState: recorder ? recorder.state : null,
+    elapsedMs: active ? performance.now() - active.startedMs : null,
+    callbacks: active ? active.callbacks : 0, rafs: active ? active.rafs : 0 });
+}
+function safeState() {
+  if (!w || !candidateDocument) {
+    return { candidateReady: false, reason: '候选窗口尚未完成初始化', environment: liveEnvironment(),
+      elapsedSinceLoadStartMs: loadStarted === null ? null : performance.now() - loadStarted };
+  }
+  try { return state(); } catch (e) {
+    let environment = null;
+    try { environment = liveEnvironment(); } catch (_) { /* document may have navigated */ }
+    return { collectionError: String(e), environment };
+  }
+}
+function cancelWait() {
+  if (waitTimer !== null) clearTimeout(waitTimer);
+  if (waitRaf !== null && w) w.cancelAnimationFrame(waitRaf);
+  waitTimer = waitRaf = null; budget = null;
+}
+function fail(error) {
+  if (dead || finished) return;
+  const oldPhase = phase;
+  dead = true; busy = false; phase = 'failed'; run++;
+  const before = safeState();
+  cancelWait(); if (loadTimer !== null) clearTimeout(loadTimer); loadTimer = null;
+  if (monitorTimer !== null) clearInterval(monitorTimer); monitorTimer = null;
+  lock(); $('initialize').disabled = true; $('json').disabled = false;
+  if (videoChunks.length > 0) $('video').disabled = false;
+  report.status = 'failed'; report.finishedAt = new Date().toISOString();
+  report.errors.push({ phase: oldPhase, message: String(error.stack || error), at: report.finishedAt });
+  recordStep('failure-before-cleanup', before);
+  const cleanup = { attempted: false, journeyReturned: null, journeyError: null,
+    recorderBefore: recorder ? recorder.state : null, recorderStopped: false, recorderError: null, after: null };
+  try {
+    if (w && w.document === candidateDocument && w.__SE && active && !active.journeyStopped) {
+      cleanup.attempted = true; cleanup.journeyReturned = w.__SE.journeyStop();
+    }
+  } catch (e) { cleanup.error = String(e.stack || e); cleanup.journeyError = cleanup.error; }
+  try {
+    if (recorder && recorder.state === 'recording') { recorder.stop(); cleanup.recorderStopped = true; }
+  } catch (e) { cleanup.recorderError = String(e.stack || e); }
+  cleanup.after = safeState(); report.cleanup.push(clone(cleanup));
+  active = null; $('status').textContent = '失败：停止扩大验证'; show();
+}
+function event(type, extra) {
+  report.events.push({ type, at: new Date().toISOString(), environment: clone(liveEnvironment()), ...extra });
+  if (report.events.length > 80) report.events.shift();
+}
+function liveToken(token) { assert(!dead && !finished && token === run, '任务已失效，不接受成功结果'); }
+function deadlineGuard() {
+  if (budget && performance.now() >= budget.deadline) {
+    recordStep('deadline-exceeded', { label: budget.label, budgetMs: budget.ms,
+      actualElapsedMs: performance.now() - budget.started, overshootMs: performance.now() - budget.deadline,
+      snapshot: safeState() });
+    throw Error(budget.label + '超时（成功回调已超过绝对截止时间）');
+  }
+}
+function environmentGuard() {
+  deadlineGuard();
+  assert(w.document === candidateDocument, '候选文档实例已变化');
+  assert(w.location.href === new URL(CANDIDATE, location.href).href, '候选URL或fragment变化');
+  assert(new URL(w.location.href).searchParams.get('candidateHold') === '0', 'candidateHold未配置为0');
+  const parentState = document.visibilityState, iframeState = w.document.visibilityState;
+  assert(parentState === 'visible' && iframeState === 'visible',
+    '页面隐藏：停止采样（父=' + parentState + '，候选=' + iframeState + '）');
+  const modules = Array.from(w.document.querySelectorAll('script[type="module"][src]')).map(s => s.src);
+  const wanted = new URL('/js/rh-candidate-preview-v4.js', location.href).href;
+  assert(modules.filter(src => src === wanted).length === 1, '候选模块URL不匹配或重复');
+  assert(!w.__SE.ctxLost, 'WebGL上下文丢失');
+  assert(w.__RH_CANDIDATE__.errors.length === 0, '候选内部错误');
+}
+function identityGuard(token) {
+  liveToken(token);
+  assert(performance.now() < identityDeadline, '身份检查超过绝对10秒截止时间');
+  environmentGuard();
+}
+async function fingerprint(url, expected, token) {
+  identityGuard(token);
+  const response = await fetch(url, { cache: 'no-store' });
+  identityGuard(token);
+  assert(response.ok, '身份资源请求失败：' + url + ' HTTP ' + response.status);
+  const bytes = await response.arrayBuffer();
+  identityGuard(token);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  identityGuard(token);
+  const sha256 = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+  const result = { requestedURL: new URL(url, location.href).href, responseURL: response.url,
+    bytes: bytes.byteLength, sha256, expectedSHA256: expected, matched: sha256 === expected };
+  report.identity.resources.push(result); show();
+  assert(new URL(response.url).origin === location.origin, '身份资源重定向至其他来源');
+  assert(sha256 === expected, '候选内容指纹不匹配：' + url);
+}
+function telemetry(source) {
+  if (!active) return;
+  active.callbacks++; if (source === 'raf') active.rafs++;
+  const s = w.__SE, r = w.__RH_CANDIDATE__, ci = canvasInfo();
+  report.telemetry.push({ source, at: new Date().toISOString(),
+    sinceRecorderMs: active.recordStartedMs === null ? null : performance.now() - active.recordStartedMs,
+    lg: s.journeyInfo.lg, cosmic: s.journeyInfo.cs, on: s.journeyInfo.on, cine: s.journeyInfo.cine,
+    generation: r.generation, firstFrame: r.first ? r.first.frame : null,
+    sourceFrame: r.first ? r.first.sourceFrame : null, completed: r.first ? r.first.completed : null,
+    seekCalls: observedSeekCalls, recorderState: recorder ? recorder.state : null,
+    canvas: ci ? [ci.width, ci.height] : null });
+  if (report.telemetry.length > report.limits.telemetryEntries) report.telemetry.shift();
+}
+function checkMissingSource() {
+  if (!active || !phase.endsWith('-entry')) return;
+  const s = w.__SE, r = w.__RH_CANDIDATE__;
+  if (s.journeyInfo.cs && (!r.entry || !r.first || r.generation <= active.baselineGeneration)) {
+    if (active.missingSince === null) {
+      active.missingSince = performance.now(); recordStep('missing-source-observed', state());
+    }
+    assert(performance.now() - active.missingSince < 250, '宇宙层缺少本轮接力来源/首帧证据');
+  } else active.missingSince = null;
+}
+function handoffChecks(r) {
+  const f = r.first, e = r.entry, b = active;
+  return { newGeneration: r.generation === b.baselineGeneration + 1,
+    newFirstObject: f !== b.oldFirst, newEntryObject: e !== b.oldEntry,
+    completed: !!f && f.completed === true,
+    adjacent: !!f && Number.isFinite(f.frame) && f.frame - f.sourceFrame === 1,
+    sourceMatchesEntry: !!e && !!f && e.mainFrame === f.sourceFrame && e.mainLg < 20,
+    sourceAfterBaseline: !b.oldFirst || !Number.isFinite(b.oldFirst.frame) || !f || f.sourceFrame >= b.oldFirst.frame,
+    entryBelowBoundary: !!f && f.lg >= 20 && f.lg < 20.03,
+    naturalNoSeek: observedSeekCalls === b.seekBaseline,
+    liveCosmicCine: w.__SE.journeyInfo.on && w.__SE.journeyInfo.cine && w.__SE.journeyInfo.cs &&
+      !!f && Math.abs(w.__SE.journeyInfo.lg - f.lg) < 1e-10 };
+}
+function acceptHandoff(token) {
+  liveToken(token); environmentGuard();
+  const r = w.__RH_CANDIDATE__, checks = handoffChecks(r);
+  recordStep('natural-handoff-checks', { checks, state: state(),
+    sinceRecorderMs: performance.now() - active.recordStartedMs });
+  assert(Object.values(checks).every(v => v === true), '本轮自然接力身份/相邻性/边界检查失败');
+  assert(typeof r.validate === 'function', '缺少validate接口');
+  const accepted = clone({ first: r.first, entry: r.entry, generation: r.generation });
+  const validation = clone(r.validate());
+  liveToken(token); environmentGuard();
+  assert(JSON.stringify(accepted) === JSON.stringify(clone({ first: r.first, entry: r.entry, generation: r.generation })),
+    'validate期间接力证据被原地改写');
+  recordStep('natural-handoff-validation', validation);
+  assert(validation.status === 'passed-limited' && Object.keys(validation.checks || {}).length > 0 &&
+    Object.values(validation.checks).every(v => v === true), '候选validate未全部通过');
+  active.handoff = { atMs: performance.now(), sinceRecorderMs: performance.now() - active.recordStartedMs,
+    lg: w.__SE.journeyInfo.lg, frame: r.first.frame, sourceFrame: r.first.sourceFrame,
+    generation: r.generation, accepted };
+  active.handoffFirstRef = r.first; active.handoffEntryRef = r.entry;
+  active.handoffLg = w.__SE.journeyInfo.lg;
+  active.lastProgressLg = active.handoffLg; active.freezeSince = performance.now();
+  phase = 'post-entry'; beginBudget(report.limits.postHandoffMs + 2000, '接力后连续观察');
+  scheduleRaf(sample);
+}
+function nextFrames(token, fn) {
+  const step = (remaining) => {
+    scheduleRaf(() => {
+      if (dead || finished || token !== run) return;
+      try {
+        environmentGuard();
+        if (remaining > 1) step(remaining - 1);
+        else {
+          fn();
+          // MediaRecorder.onstop is asynchronous; its budget must remain armed.
+          if (!dead && !finished) { liveToken(token); environmentGuard(); }
+        }
+      } catch (e) { fail(e); }
+    });
+  };
+  step(2);
+}
+function scheduleRaf(fn) { waitRaf = w.requestAnimationFrame(fn); }
+function beginBudget(ms, label) {
+  cancelWait();
+  budget = { ms, label, started: performance.now(), deadline: performance.now() + ms };
+  waitTimer = setTimeout(() => {
+    if (dead || finished) return;
+    const elapsed = budget ? performance.now() - budget.started : null;
+    recordStep('budget-expired', { label, budgetMs: ms, actualElapsedMs: elapsed,
+      overshootMs: elapsed === null ? null : Math.max(0, elapsed - ms), snapshot: safeState() });
+    fail(Error(label + '超时（预算' + ms + 'ms）'));
+  }, ms);
+}
+function chooseMime() {
+  assert(typeof window.MediaRecorder === 'function', '浏览器不支持MediaRecorder');
+  const candidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  return candidates.find(m => window.MediaRecorder.isTypeSupported(m)) || null;
+}
+function startRecorder(canvas, mimeType) {
+  assert(typeof canvas.captureStream === 'function', '候选canvas不支持captureStream');
+  videoStream = canvas.captureStream(report.limits.captureFps);
+  assert(videoStream && videoStream.getVideoTracks().length === 1, '画布流没有单个视频轨');
+  videoTrack = videoStream.getVideoTracks()[0];
+  videoChunks = [];
+  recorder = new window.MediaRecorder(videoStream, { mimeType, videoBitsPerSecond: 8000000 });
+  recorder.ondataavailable = e => { if (e && e.data && e.data.size > 0) videoChunks.push(e.data); };
+  recorder.onerror = e => fail(Error('MediaRecorder异常：' + String(e.error || e)));
+  videoTrack.addEventListener('ended', () => { if (!dead && !finished) fail(Error('画布视频轨提前结束')); });
+  return videoTrack.getSettings ? videoTrack.getSettings() : {};
+}
+function start() {
+  if (busy || dead || finished) return;
+  try {
+    environmentGuard(); assert(booted, '候选身份尚未完成'); assert(phase === 'ready', '启动阶段不合法');
+    const canvasList = Array.from(candidateDocument.querySelectorAll('#stage canvas'));
+    assert(canvasList.length === 1, '无法唯一定位候选主canvas');
+    const canvas = canvasList[0], mimeType = chooseMime();
+    assert(mimeType, '没有可用WebM录制格式');
+    const settings = startRecorder(canvas, mimeType);
+    const r = w.__RH_CANDIDATE__, s = w.__SE, ci = canvasInfo();
+    const generationUnset = r.generation === undefined;
+    assert(generationUnset ? r.first == null && r.entry == null :
+      Number.isSafeInteger(r.generation) && r.generation >= 0, '启动基线generation无效');
+    const baseline = { generation: generationUnset ? 0 : r.generation, generationUnset,
+      first: r.first, entry: r.entry, restores: r.restores.length, seekBaseline: observedSeekCalls };
+    active = { startedMs: performance.now(), recordStartedMs: null, callbacks: 0, rafs: 0, lastMs: null,
+      baselineGeneration: baseline.generation, baselineGenerationUnset: baseline.generationUnset,
+      oldFirst: baseline.first, oldEntry: baseline.entry,
+      restoreBaseline: baseline.restores, seekBaseline: baseline.seekBaseline, missingSince: null,
+      handoff: null, handoffLg: null, lastProgressLg: null, freezeSince: null, journeyStopped: false,
+      token: ++run };
+    busy = true; lock(); phase = 'first-entry';
+    report.video.mimeType = recorder.mimeType || mimeType;
+    report.video.canvas = ci;
+    report.video.tracks = clone({ kind: videoTrack.kind, readyState: videoTrack.readyState,
+      settings, label: videoTrack.label ? 'present' : null });
+    recorder.start(250);
+    active.recordStartedMs = performance.now();
+    report.video.startWall = new Date().toISOString();
+    report.video.startMonotonicMs = active.recordStartedMs;
+    recordStep('recorder-start', { state: state(), video: clone(report.video) });
+    beginBudget(report.limits.handoffMs, '自然接力等待');
+    const started = s.journey(); liveToken(active.token); environmentGuard();
+    assert(started === true, '旅程启动返回失败');
+    assert(s.journeyInfo.on && s.journeyInfo.cine && !s.journeyInfo.cs && s.journeyInfo.lg < 20,
+      '自然起步不是主场景cine');
+    recordStep('journey-start', state());
+    scheduleRaf(sample);
+  } catch (e) { fail(e); }
+}
+function sample() {
+  if (dead || finished || !active) return;
+  try {
+    liveToken(active.token); environmentGuard(); telemetry('raf'); checkMissingSource();
+    const s = w.__SE, r = w.__RH_CANDIDATE__, t = performance.now();
+    assert(s.journeyInfo.on, '旅程在证据采集前已停止');
+    assert(observedSeekCalls === active.seekBaseline, '录制期间调用了公开seek接口');
+    const pristineUnset = active.baselineGenerationUnset && r.generation === undefined &&
+      r.first == null && r.entry == null && !s.journeyInfo.cs;
+    assert(pristineUnset || (!active.baselineGenerationUnset && r.generation === active.baselineGeneration) ||
+      r.generation === active.baselineGeneration + 1, '候选generation异常变化');
+    const ci = canvasInfo();
+    assert(ci && ci.width === report.video.canvas.width && ci.height === report.video.canvas.height,
+      '录制期间候选canvas尺寸变化');
+    if (!active.handoff) {
+      const staleCompleted = r.first && r.first.completed && r.generation === active.baselineGeneration;
+      assert(!staleCompleted, '首次入场检测到旧completed证据');
+      if (r.generation === active.baselineGeneration + 1 && r.first && r.first.completed) {
+        acceptHandoff(active.token); return;
+      }
+      scheduleRaf(sample); return;
+    }
+    assert(r.generation === active.handoff.generation, '接力后generation变化');
+    assert(r.first === active.handoffFirstRef && r.entry === active.handoffEntryRef,
+      '接力证据对象被替换');
+    assert(JSON.stringify(clone({ first: r.first, entry: r.entry, generation: r.generation })) ===
+      JSON.stringify(active.handoff.accepted), '接力证据被原地改写');
+    assert(s.journeyInfo.cs && s.journeyInfo.cine, '接力后不是连续宇宙cine');
+    assert(s.journeyInfo.lg >= active.handoffLg - 1e-10, '接力后尺度回退');
+    if (s.journeyInfo.lg > active.lastProgressLg + 1e-6) {
+      active.lastProgressLg = s.journeyInfo.lg; active.freezeSince = t;
+    }
+    assert(t - active.freezeSince < 2000, '接力后画面尺度冻结超过2秒');
+    if (t - active.handoff.atMs >= report.limits.postHandoffMs) {
+      const progress = s.journeyInfo.lg - active.handoffLg;
+      assert(progress >= 0.02, '接力后尺度进展不足：' + progress);
+      assert(active.rafs >= 20, '接力后rAF采样不足');
+      recordStep('continuity-observed', { state: state(), handoff: clone(active.handoff),
+        progressLg: progress, rafSamples: active.rafs, sinceRecorderMs: performance.now() - active.recordStartedMs });
+      stopJourneyAndRecorder(active.token); return;
+    }
+    scheduleRaf(sample);
+  } catch (e) { fail(e); }
+}
+function stopJourneyAndRecorder(token) {
+  liveToken(token); environmentGuard();
+  phase = 'stopping'; active.stopStartedMs = performance.now();
+  const s = w.__SE, cs = s.CS, r = w.__RH_CANDIDATE__, T = s.THREE;
+  const before = state(), records = r.restores, oldRecords = records.slice(), length = records.length, gen = r.generation;
+  const returned = s.journeyStop(); active.journeyStopped = true;
+  liveToken(token); environmentGuard();
+  const added = r.restores.slice(length);
+  const standard = new T.PerspectiveCamera(cs.cam.fov, cs.cam.aspect, cs.cam.near, cs.cam.far);
+  const maxDiff = (a, b) => a.length === b.length && a.every(Number.isFinite) && b.every(Number.isFinite)
+    ? Math.max(...a.map((v, i) => Math.abs(v - b[i]))) : Infinity;
+  const actual = cs.cam.projectionMatrix.toArray();
+  const diff = maxDiff(standard.projectionMatrix.toArray(), actual);
+  const inverse = cs.cam.projectionMatrix.clone().multiply(cs.cam.projectionMatrixInverse).toArray();
+  const inverseError = maxDiff(new T.Matrix4().toArray(), inverse);
+  const checks = { returnedTrue: returned === true, journeyOff: !s.journeyInfo.on, upCleared: cs.upCur === null,
+    standardProjection: diff < 1e-12, inverseConsistent: inverseError < 1e-10,
+    generationUnchanged: r.generation === gen,
+    historyPreserved: r.restores === records && oldRecords.every((x, i) => r.restores[i] === x),
+    freshStopRecord: added.length === 1 && !oldRecords.includes(added[0]) && added[0].reason === 'stop' &&
+      Number.isFinite(added[0].frame) && added[0].frame >= active.handoff.frame &&
+      maxDiff(added[0].projection || [], actual) < 1e-12 &&
+      maxDiff(added[0].inverse || [], cs.cam.projectionMatrixInverse.toArray()) < 1e-12 };
+  recordStep('journey-stop', { before, returned, added, checks, projectionDifference: diff, inverseError, after: state() });
+  assert(Object.values(checks).every(v => v === true), '停止清理检查失败');
+  beginBudget(report.limits.stopMs, '录制收尾');
+  nextFrames(token, () => {
+    liveToken(token); environmentGuard();
+    assert(recorder && recorder.state === 'recording', '录制器未处于recording状态');
+    recorder.stop();
+  });
+}
+function finalizeVideo(token) {
+  liveToken(token); environmentGuard();
+  assert(recorder && recorder.state === 'inactive', '录制器尚未停止');
+  assert(videoChunks.length > 0, '没有收到视频数据块');
+  videoBlob = new window.Blob(videoChunks, { type: report.video.mimeType || 'video/webm' });
+  report.video.blobCreated = true; report.video.chunks = videoChunks.length; report.video.bytes = videoBlob.size;
+  report.video.stopWall = new Date().toISOString(); report.video.stopMonotonicMs = performance.now();
+  report.video.durationMs = report.video.stopMonotonicMs - report.video.startMonotonicMs;
+  assert(report.video.bytes > 0, '录制视频为空');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  report.video.downloadName = 'rh-v4-continuity-' + stamp + '.webm';
+  if (videoURL) URL.revokeObjectURL(videoURL);
+  videoURL = URL.createObjectURL(videoBlob);
+  recordStep('video-stopped', { video: clone(report.video), telemetryEntries: report.telemetry.length });
+  assert(report.errors.length === 0, '存在错误，禁止提交通过终态');
+  finished = true; run++; cancelWait(); if (monitorTimer !== null) clearInterval(monitorTimer); monitorTimer = null;
+  phase = 'finished'; report.status = 'passed-limited'; report.finishedAt = new Date().toISOString();
+  lock(); $('json').disabled = false; $('video').disabled = false;
+  recordStep('finished', { boundedStateChecksPassed: true, visualApproval: false });
+}
+function attachRecorderStop(token) {
+  liveToken(token);
+  recorder.onstop = () => {
+    if (dead || finished) return;
+    try { finalizeVideo(token); } catch (e) { fail(e); }
+  };
+}
+function refreshForeground() {
+  if (dead || finished || candidateStarted) return;
+  const visibilityState = document.visibilityState, hasFocus = document.hasFocus();
+  const ready = visibilityState === 'visible' && hasFocus;
+  $('initialize').disabled = !ready;
+  $('status').textContent = (ready ? '前台已就绪：可初始化候选' : '等待前台激活') +
+    '（visibility=' + visibilityState + '，focus=' + hasFocus + '）';
+}
+function initialize() {
+  if (dead || finished || candidateStarted) return;
+  if (document.visibilityState !== 'visible' || !document.hasFocus()) { refreshForeground(); return; }
+  try {
+    candidateStarted = true; $('initialize').disabled = true;
+    phase = 'loading'; report.status = 'loading';
+    loadStarted = performance.now(); loadDeadline = loadStarted + report.limits.loadMs;
+    recordStep('foreground-initialize', { environment: liveEnvironment(), loadDeadlineMs: report.limits.loadMs });
+    loadTimer = setTimeout(() => fail(Error('候选iframe加载超过15秒')), report.limits.loadMs);
+    frame.src = CANDIDATE;
+  } catch (e) { fail(e); }
+}
+lock(); refreshForeground(); show();
+async function boot() {
+  if (dead || finished) return;
+  if (!candidateStarted) return; // Ignore the iframe's initial about:blank load.
+  try {
+    if (!booting && !booted && frame.contentWindow.location.href === 'about:blank') return;
+    if (booting || booted) throw Error('候选iframe重复load/文档重载');
+    if (loadTimer !== null) clearTimeout(loadTimer); loadTimer = null;
+    booting = true; const token = run; identityDeadline = performance.now() + 10000;
+    assert(performance.now() < loadDeadline, '候选iframe加载超过绝对15秒截止时间');
+    w = frame.contentWindow; candidateDocument = w.document;
+    assert(w.__SE && w.__RH_CANDIDATE__ && w.__rhInternals, '候选接口未就绪');
+    originalSeek = w.__SE.journeySeek;
+    assert(typeof originalSeek === 'function', '缺少seek诊断接口');
+    seekWrapper = function(...args) { observedSeekCalls++; return originalSeek.apply(this, args); };
+    w.__SE.journeySeek = seekWrapper;
+    w.addEventListener('error', e => fail(Error('候选页面异常：' + e.message)));
+    w.addEventListener('unhandledrejection', e => fail(Error('候选未处理拒绝：' + String(e.reason))));
+    for (const target of [window, w]) {
+      target.addEventListener('pagehide', () => { if (!dead && !finished) fail(Error('页面pagehide')); });
+      target.addEventListener('hashchange', () => { if (!dead && !finished) fail(Error('URL fragment变化')); });
+    }
+    w.document.addEventListener('visibilitychange', visibility);
+    environmentGuard();
+    report.identity = { environment: liveEnvironment(), expectedIframeURL: new URL(CANDIDATE, location.href).href,
+      candidateHoldConfigured: new URL(w.location.href).searchParams.get('candidateHold') === '0',
+      moduleURLs: Array.from(w.document.querySelectorAll('script[type="module"][src]')).map(s => s.src),
+      build: w.__SE.build, title: w.document.title, clusters: w.__rhInternals.MWGC_LIST.length,
+      mainCanvas: canvasInfo(), resources: [], fetchedBytesOnly: true };
+    assert(report.identity.candidateHoldConfigured, 'candidateHold未配置为0');
+    const timeout = setTimeout(() => fail(Error('身份检查超过10秒')), 10000);
+    try { for (const [url, hash] of Object.entries(EXPECTED)) await fingerprint(url, hash, token); }
+    finally { clearTimeout(timeout); }
+    if (dead || finished) return;
+    identityGuard(token); environmentGuard();
+    booted = true; booting = false; phase = 'ready'; report.status = 'ready';
+    recordStep('identity-ready', { identity: report.identity, state: state() }); offer('record');
+    monitorTimer = setInterval(() => {
+      if (dead || finished) return;
+      try { environmentGuard(); telemetry('watchdog'); checkMissingSource(); show(); }
+      catch (e) { fail(e); }
+    }, 200);
+  } catch (e) { fail(e); }
+}
+function visibility() {
+  if (dead || finished) return;
+  try {
+    event('visibilitychange', {});
+    if (!candidateStarted) { refreshForeground(); return; }
+    assert(document.visibilityState === 'visible', '父页面隐藏：停止采样（visibilityState=' + document.visibilityState + '）');
+    if (w && candidateDocument) environmentGuard();
+  } catch (e) { fail(e); }
+}
+document.addEventListener('visibilitychange', visibility);
+window.addEventListener('focus', refreshForeground);
+window.addEventListener('blur', refreshForeground);
+window.addEventListener('pagehide', () => { if (!dead && !finished) fail(Error('页面pagehide')); });
+window.addEventListener('error', e => fail(Error('面板异常：' + e.message)));
+window.addEventListener('unhandledrejection', e => fail(Error('面板未处理拒绝：' + String(e.reason))));
+frame.addEventListener('load', boot);
+$('initialize').onclick = initialize;
+$('record').onclick = () => {
+  start();
+  if (active && recorder) {
+    const token = active.token;
+    attachRecorderStop(token);
+  }
+};
+$('json').onclick = () => {
+  const u = URL.createObjectURL(new window.Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }));
+  const a = document.createElement('a'); a.href = u;
+  a.download = 'rh-v4-continuity-report-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+  a.click(); setTimeout(() => URL.revokeObjectURL(u), 1000);
+};
+$('video').onclick = () => {
+  if (!videoURL) return;
+  const a = document.createElement('a'); a.href = videoURL; a.download = report.video.downloadName; a.click();
+};
+lock(); refreshForeground(); show();
+</script>
+</body>
+</html>

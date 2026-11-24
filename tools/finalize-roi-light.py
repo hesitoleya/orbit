@@ -1,0 +1,20 @@
+"""Recover metadata/probe evidence for completed cache without rerunning its bake."""
+import importlib.util,json,gzip,hashlib
+from pathlib import Path
+import numpy as np
+
+def load(path,name):
+ s=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(s);s.loader.exec_module(m);return m
+C=load('tools/roi-light-common.py','common');B=load('tools/bake-cinematic-nebula.py','baker');root=Path('.workbuddy/v210-roi-light');r=json.loads(Path('.workbuddy/v208-roi/report.json').read_text());p=next(p for p in json.loads(Path('public/data/cinematic-nebula/manifest.json').read_text())['profiles'] if p['id']=='orion');lo=np.array(r['bounds']['min']);hi=np.array(r['bounds']['max'])
+def read(path,expected):
+ raw=gzip.decompress(Path(path).read_bytes());assert hashlib.sha256(raw).hexdigest()==expected;return np.frombuffer(raw,np.uint8).reshape(256,256,256,4)[...,3].astype(np.float32)/255*12
+base=read('public/data/cinematic-nebula/'+p['medium']['file'],p['medium']['rawSha256']);fine=read('.workbuddy/v208-roi/orion-roi-256.rgba8.bin.gz',r['rawSha256'])
+axes=[lo[k]+(np.arange(8)*8+.5)/64*(hi[k]-lo[k]) for k in range(3)];z,y,x=np.meshgrid(axes[2],axes[1],axes[0],indexing='ij');probe=np.stack([x,y,z],axis=-1);pos=B.LIGHTS['orion'][0]['position'];a=C.trace(base,fine,probe,pos,lo,hi,192,True);b=C.trace(base,fine,probe,pos,lo,hi,384,True);c=C.trace(base,fine,probe,pos,lo,hi,192,False)
+gz=(root/'roi-light-rgb-direction-64.bin.gz').read_bytes();raw=gzip.decompress(gz);assert len(raw)==64**3*6
+# Independently recompute all three lights at exact sampled cache centres to bound encoding error.
+point=np.zeros(probe.shape,np.float32);moment=np.zeros_like(point)
+for light in B.LIGHTS['orion']:
+ tau=C.trace(base,fine,probe,light['position'],lo,hi,192,True);d=np.asarray(light['position'])-probe;distance=np.linalg.norm(d,axis=-1);v=(light['power']*np.exp(-np.minimum(tau,30))/(.45+distance*distance))[...,None]*np.asarray(light['color']);point+=v;moment+=C.normalize(-d)*np.sum(v*np.array([.2126,.7152,.0722]),axis=-1)[...,None]
+float_rgb=point+np.array([.035,.042,.055]);float_direction=C.normalize(moment);encoded=np.frombuffer(raw,np.uint8).reshape(64,64,64,6)[::8,::8,::8];decoded_rgb=encoded[...,:3].astype(np.float32)/255*4;decoded_direction=encoded[...,3:].astype(np.float32)/255*2-1;rgb_error=float(np.max(np.abs(decoded_rgb-np.clip(float_rgb,0,4))));direction_error=float(np.max(np.abs(decoded_direction-float_direction)));assert rgb_error<4/510+1e-5 and direction_error<1/255+1e-5
+report={'sparseCacheRgbMaxEncodingError':rgb_error,'sparseCacheDirectionMaxComponentError':direction_error,'sparseIncidentClippedFraction':float(np.mean(float_rgb>4)),'dimensions':[64]*3,'bounds':r['bounds'],'shadowSteps':192,'shadowProbeSteps':384,'probeCount':512,'probeTauMaxDelta':float(np.max(np.abs(a-b))),'probeTauMeanDelta':float(np.mean(np.abs(a-b))),'fineVsCoarseTauMax':float(np.max(np.abs(a-c))),'fineVsCoarseTauMean':float(np.mean(np.abs(a-c))),'rawBytes':len(raw),'compressedBytes':len(gz),'rawSha256':hashlib.sha256(raw).hexdigest(),'sha256':hashlib.sha256(gz).hexdigest(),'encoding':'interleaved RGB incident UNORM8 scale4 + Cartesian incoming UNORM8, 6 bytes/texel; not directly GPU uploadable','lightSources':B.LIGHTS['orion'],'ambient':[.035,.042,.055],'albedo':p['scatteringAlbedo'],'sourceBaseRawSha256':p['medium']['rawSha256'],'sourceBrickRawSha256':r['rawSha256'],'limits':'Full cache192step bake completed; obsolete float-only render canceled before report. This metadata recovered from cache and recomputed512point first-light probes. Probe tau stats are SPARSE not full cache stats or convergence bound. 64cubed grid over.65 ROI gives2x per-axis resolution of original128cubed global light, still4x coarser than fine sigma. RGB includes ambient and clips at4; point moment approximate not per-source phase. Original CC0 mathematical field; no production changes or GPU validation.'}
+(root/'report.json').write_text(json.dumps(report,indent=2));print(json.dumps(report,indent=2))

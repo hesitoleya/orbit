@@ -1,0 +1,25 @@
+'use strict';
+// Historical filename retained as a lightweight production integration contract.
+const fs=require('node:fs'),assert=require('node:assert/strict');
+const app=fs.readFileSync('public/js/app.js','utf8');
+assert(app.includes('uSolarBand: { value: 0 }'));
+assert(app.includes('uniform float uSolarBand, uAtmoEnabled;'));
+assert(app.includes('uSkyPanorama: { value: skyPanoramaEmpty }'));
+assert(app.includes('uPanoramaReady: { value: 0 }'));
+assert(app.includes('uniform sampler2D uSkyPanorama;'));
+assert(app.includes('vec2 uv = panoramaUV(dir);'));
+assert(app.includes('texture2D(uSkyPanorama, uv)'));
+assert(app.includes('gl_FragColor = vec4(L, uPhotoAlpha);'));
+assert(!/uDiffusePanorama|uDiffuseReady|uDiffuseBlend|PHOTO_GALAXY|createPhotoGalaxy/.test(app),'native panorama never replaced by blurred diffuse/depth-invented field');
+assert(app.includes('if (uSolarBand > 0.0 && uPanoramaReady > 0.5)'));
+assert(app.includes('uniform vec3 uGalPole, uGalCenter;'));
+assert(app.includes('skyMat.uniforms.uSolarBand.value = solarBackdropGain(cam.focus === EARTH, altNow,'));
+assert(app.includes('skyMat.uniforms.uAtmoEnabled.value = earthNear ? 1 : 0;'));
+assert(app.includes('skyMesh.visible = true;'));
+assert(app.includes('skyMesh.renderOrder = -1002;'));
+assert(app.includes('{ max: 1.2, size: 4.2 }'));
+assert(app.includes('size: 15, map: spikeTex'));
+assert(app.includes('updateStarOpacity(starMats, starA, heroStarK, photoGain);'));
+const sky=app.slice(app.indexOf('const skyMat ='),app.indexOf('const skyMesh ='));
+assert(!/float\s+(?:h13|n3|rift|sunGlow|zodiac)\b/.test(sky),'photo replacement must not retain procedural dust band');
+console.log('PASS solar background photographic integration: ready-gated observed panorama, atmospheric/scene gates, sky-before-stars, quiet catalogue/synthetic photo blend; static integration contract only, behavior and GPU acceptance separate.');

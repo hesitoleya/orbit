@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>RH v4 有界验收面板（非正式入口）</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#111820;color:#e4edf5;font:13px system-ui}header{padding:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}button{background:#264855;color:#fff;border:1px solid #4e8593;padding:8px;border-radius:5px}button:disabled{opacity:.4}#status{color:#9cdcd3}iframe{width:100%;height:calc(100vh - 200px);min-height:420px;border:0}pre{height:115px;margin:0;padding:8px;overflow:auto;white-space:pre-wrap;background:#17222d}small{display:block;padding:0 10px;color:#bac6d0}
+</style></head>
+<body>
+<header><b>隔离候选 v4 · 证据链 v2</b>
+<button id="first" disabled>1 自然入场</button><button id="lg21" disabled>2 定位 lg21</button>
+<button id="stop" disabled>3 停止并核验</button><button id="second" disabled>4 第二次自然入场</button>
+<button id="finish" disabled>结束并停止</button><button id="download">下载本轮 JSON</button>
+<span id="status">核对候选身份</span></header>
+<small>起步须可见；自然入场不seek。20秒为事件循环超时预算，不能抢占主线程。隐藏、缺来源帧或异常立即失败并保存停止前后现场（焦点仅记录）。lg21仅为定点证据，非自然连续画面。</small>
+<iframe id="scene" title="既有右手候选v4"></iframe><pre id="output" role="log" aria-label="验收报告"></pre>
+<script>
+'use strict';
+/* This inline controller is also executed verbatim by tools/test-rh-v4-panel.cjs.
+ * It never edits the candidate; fetched byte identity is not proof of executed bytes. */
+const $ = id => document.getElementById(id), frame = $('scene');
+const CANDIDATE = '/rh-candidate-preview-v4.html?fresh=1&candidateHold=1&auto=0';
+const EXPECTED = Object.freeze({
+  '/rh-candidate-preview-v4.html': '5553489f3a0917ea195cd167f4cbbf02f8d0fa96d382f123feec24b78f0185e6',
+  '/js/rh-candidate-preview-v4.js': '89177e14d69390d935ba6c1a2c9c7fb03ab3f66e42ac9799ac2701839f2bedb7'
+});
+const IDS = ['first', 'lg21', 'stop', 'second', 'finish'];
+const report = {
+  schema: 2, harness: 'rh-v4-evidence-chain-v2', candidate: 'existing-rh-v4',
+  startedAt: new Date().toISOString(), scope: 'isolated HTTP iframe only', status: 'loading',
+  identity: null, steps: [], errors: [], telemetry: [], events: [], cleanup: [],
+  limits: { entryBudgetMs: 20000, monitorPeriodMs: 200, telemetryEntries: 120 },
+  limitations: [
+    'not production space.html or space-http.html; no candidate rewrite',
+    'fetched HTML/JS hashes plus module URL, not independent proof of executed bytes or cache contents',
+    'iframe startup errors before load are not observed; boot/identity checks do not prove no such errors',
+    'candidate main snapshot is captured before render; cosmic completed means CPU render returned, not GPU completion',
+    'last available main snapshot, not same-physical-time handoff or finite-star parallax',
+    'frame telemetry records monitor callbacks, not every application or GPU frame',
+    '20s timers cannot preempt a blocked event loop; actual elapsed and overshoot are recorded',
+    'candidateHold is configuration evidence; stable completed first-frame capture is checked separately',
+    'seek wrapper counts public API calls only; retained original functions/closures are not observable',
+    'stop record freshness is array identity/prefix/increment evidence, not an independent current-frame clock',
+    'lg21 is seeked, not natural continuous playback; no visual approval, full endpoints or reverse playback'
+  ]
+};
+let w = null, candidateDocument = null, booted = false, booting = false;
+let dead = false, finished = false, busy = false, phase = 'loading', run = 0;
+let active = null, waitTimer = null, waitRaf = null, monitorTimer = null;
+let firstEvidence = null, firstRef = null, entryRef = null, generation = 0, firstFrame = 0;
+let missingSince = null, loadTimer = null, identityDeadline = null, budget = null;
+const loadStarted = performance.now(), loadDeadline = loadStarted + 15000;
+let observedSeekCalls = 0, originalSeek = null, seekWrapper = null;
+const clone = value => value === undefined ? null : JSON.parse(JSON.stringify(value));
+const assert = (ok, message) => { if (!ok) throw Error(message); };
+function show() { $('output').textContent = JSON.stringify(report, null, 2); }
+function record(step, result) {
+  const snapshot = clone(result);
+  if (step !== 'failure-before-cleanup') {
+    assert(!dead, '失败终态禁止追加成功或诊断步骤');
+    if (!['deadline-exceeded', 'budget-expired'].includes(step))
+      assert(!budget || performance.now() < budget.deadline, '证据提交超过绝对截止时间');
+  }
+  report.steps.push({ step, at: new Date().toISOString(), result: snapshot });
+  $('status').textContent = step; show();
+}
+function lock() { for (const id of IDS) $(id).disabled = true; }
+function offer(id) { lock(); if (!dead && !finished) $(id).disabled = false; }
+function liveEnvironment() {
+  return {
+    parentURL: location.href, iframeURL: w ? w.location.href : null,
+    parentVisibility: document.visibilityState, iframeVisibility: w ? w.document.visibilityState : null,
+    parentHasFocus: document.hasFocus(), iframeHasFocus: w ? w.document.hasFocus() : null,
+    viewport: w ? [w.innerWidth, w.innerHeight] : null, dpr: w ? w.devicePixelRatio : null,
+    serviceWorkerController: w && w.navigator.serviceWorker && w.navigator.serviceWorker.controller
+      ? w.navigator.serviceWorker.controller.scriptURL : null
+  };
+}
+function state() {
+  const s = w.__SE, r = w.__RH_CANDIDATE__, cs = s.CS;
+  return clone({ environment: liveEnvironment(), journey: s.journeyInfo,
+    generation: r.generation, entry: r.entry, first: r.first, restores: r.restores, errors: r.errors,
+    upCur: cs.upCur ? cs.upCur.toArray() : null, ctxLost: s.ctxLost,
+    projection: cs.cam.projectionMatrix.toArray(), inverse: cs.cam.projectionMatrixInverse.toArray(),
+    elapsedMs: active ? performance.now() - active.startedMs : null,
+    monitorCallbacks: active ? active.callbacks : 0, rafCallbacks: active ? active.rafs : 0 });
+}
+function safeState() {
+  if (!w || !candidateDocument) {
+    return { candidateReady: false, reason: '候选窗口尚未完成初始化', environment: liveEnvironment(),
+      elapsedSinceLoadStartMs: performance.now() - loadStarted };
+  }
+  try { return state(); } catch (e) {
+    let environment = null;
+    try { environment = liveEnvironment(); } catch (_) { /* document may have navigated */ }
+    return { collectionError: String(e), environment };
+  }
+}
+function cancelWait() {
+  if (waitTimer !== null) clearTimeout(waitTimer);
+  if (waitRaf !== null && w) w.cancelAnimationFrame(waitRaf);
+  waitTimer = waitRaf = null; budget = null;
+}
+function fail(error) {
+  if (dead || finished) return;
+  const oldPhase = phase;
+  dead = true; busy = false; phase = 'failed'; run++;
+  const before = safeState();
+  cancelWait(); if (loadTimer !== null) clearTimeout(loadTimer); loadTimer = null;
+  if (monitorTimer !== null) clearInterval(monitorTimer);
+  monitorTimer = null; lock();
+  report.status = 'failed'; report.finishedAt = new Date().toISOString();
+  report.errors.push({ phase: oldPhase, message: String(error.stack || error), at: report.finishedAt });
+  record('failure-before-cleanup', before);
+  const cleanup = { attempted: false, returned: null, error: null };
+  try {
+    // Do not stop a different page after iframe navigation/document replacement.
+    if (w && w.document === candidateDocument && w.__SE) {
+      cleanup.attempted = true; cleanup.returned = w.__SE.journeyStop();
+    }
+  } catch (e) { cleanup.error = String(e.stack || e); }
+  cleanup.after = safeState(); report.cleanup.push(clone(cleanup));
+  active = null; $('status').textContent = '失败：停止扩大验证'; show();
+}
+function event(type, extra) {
+  report.events.push({ type, at: new Date().toISOString(), environment: clone(liveEnvironment()), ...extra });
+  if (report.events.length > 80) report.events.shift();
+}
+function liveToken(token) { assert(!dead && !finished && token === run, '任务已失效，不接受成功结果'); }
+function deadlineGuard() {
+  if (budget && performance.now() >= budget.deadline) {
+    record('deadline-exceeded', { label: budget.label, budgetMs: budget.ms,
+      actualElapsedMs: performance.now() - budget.started, overshootMs: performance.now() - budget.deadline,
+      snapshot: safeState() });
+    throw Error(budget.label + '超时（成功回调已超过绝对截止时间）');
+  }
+}
+function environmentGuard() {
+  deadlineGuard();
+  assert(w.document === candidateDocument, '候选文档实例已变化');
+  assert(w.location.href === new URL(CANDIDATE, location.href).href, '候选URL或fragment变化');
+  assert(document.visibilityState === 'visible' && w.document.visibilityState === 'visible', '页面隐藏：停止采样');
+  const modules = Array.from(w.document.querySelectorAll('script[type="module"][src]')).map(s => s.src);
+  const wanted = new URL('/js/rh-candidate-preview-v4.js', location.href).href;
+  assert(modules.filter(src => src === wanted).length === 1, '候选模块URL不匹配或重复');
+  assert(!w.__SE.ctxLost, 'WebGL上下文丢失');
+  assert(w.__RH_CANDIDATE__.errors.length === 0, '候选内部错误');
+  if (phase.endsWith('-hold')) liveHoldGuard();
+}
+function liveHoldGuard() {
+  const r = w.__RH_CANDIDATE__;
+  assert(w.__SE.journeyInfo.on && w.__SE.journeyInfo.lg === active.holdLg, 'candidateHold未保持接力尺度');
+  assert(r.first === active.acceptedFirst && r.entry === active.acceptedEntry, '保持期间接力证据被替换');
+  assert(JSON.stringify(active.holdEvidence) === JSON.stringify(clone({ first: r.first, entry: r.entry, generation: r.generation })),
+    '保持期间接力证据被原地改写');
+  assert(Object.values(handoffChecks(r)).every(v => v === true), '保持期间本轮接力检查失效');
+}
+function identityGuard(token) {
+  liveToken(token);
+  assert(performance.now() < identityDeadline, '身份检查超过绝对10秒截止时间');
+  environmentGuard();
+}
+async function fingerprint(url, expected, token) {
+  identityGuard(token);
+  const response = await fetch(url, { cache: 'no-store' });
+  identityGuard(token);
+  assert(response.ok, '身份资源请求失败：' + url + ' HTTP ' + response.status);
+  const bytes = await response.arrayBuffer();
+  identityGuard(token);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  identityGuard(token);
+  const sha256 = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+  const result = { requestedURL: new URL(url, location.href).href, responseURL: response.url,
+    bytes: bytes.byteLength, sha256, expectedSHA256: expected, matched: sha256 === expected };
+  report.identity.resources.push(result); show();
+  assert(new URL(response.url).origin === location.origin, '身份资源重定向至其他来源');
+  assert(sha256 === expected, '候选内容指纹不匹配：' + url);
+}
+function telemetry(source) {
+  if (!active) return;
+  active.callbacks++; if (source === 'raf') active.rafs++;
+  const s = state();
+  report.telemetry.push({ source, at: new Date().toISOString(), elapsedMs: s.elapsedMs,
+    gapMs: active.lastMs === null ? null : performance.now() - active.lastMs,
+    environment: s.environment, lg: s.journey.lg, cosmic: s.journey.cs,
+    generation: s.generation, firstFrame: s.first ? s.first.frame : null,
+    sourceFrame: s.first ? s.first.sourceFrame : null, completed: s.first ? s.first.completed : null,
+    entryMainFrame: s.entry ? s.entry.mainFrame : null });
+  active.lastMs = performance.now();
+  if (report.telemetry.length > report.limits.telemetryEntries) report.telemetry.shift();
+}
+function checkMissingSource() {
+  if (!active || !phase.endsWith('entry')) return;
+  const s = w.__SE, r = w.__RH_CANDIDATE__;
+  if (s.journeyInfo.cs && (!r.entry || !r.first || r.generation <= active.baselineGeneration)) {
+    if (missingSince === null) { missingSince = performance.now(); record('missing-source-observed', state()); }
+    assert(performance.now() - missingSince < 250, '宇宙层缺少本轮接力来源/首帧证据');
+  } else missingSince = null;
+}
+function handoffChecks(r) {
+  const f = r.first, e = r.entry, b = active;
+  return { newGeneration: r.generation === b.baselineGeneration + 1,
+    newFirstObject: f !== b.oldFirst, newEntryObject: e !== b.oldEntry,
+    completed: !!f && f.completed === true,
+    adjacent: !!f && Number.isFinite(f.frame) && f.frame - f.sourceFrame === 1,
+    sourceMatchesEntry: !!e && !!f && e.mainFrame === f.sourceFrame && e.mainLg < 20,
+    sourceAfterPreviousRun: !firstEvidence || f.sourceFrame > firstFrame,
+    entryBelowBoundary: !!f && f.lg >= 20 && f.lg < 20.03,
+    naturalNoSeek: observedSeekCalls === b.seekBaseline && w.__SE.journeySeek === seekWrapper,
+    liveCosmicCine: w.__SE.journeyInfo.on && w.__SE.journeyInfo.cine && w.__SE.journeyInfo.cs &&
+      !!f && Math.abs(w.__SE.journeyInfo.lg - f.lg) < 1e-10 };
+}
+function acceptHandoff(token) {
+  liveToken(token); environmentGuard();
+  const r = w.__RH_CANDIDATE__, checks = handoffChecks(r);
+  record(phase + '-checks', { checks, state: state() });
+  assert(Object.values(checks).every(v => v === true), '本轮首帧身份/相邻性/接力边界检查失败');
+  assert(typeof r.validate === 'function', '缺少validate接口');
+  const acceptedEvidence = clone({ first: r.first, entry: r.entry, generation: r.generation });
+  const validation = clone(r.validate());
+  liveToken(token); environmentGuard();
+  assert(JSON.stringify(acceptedEvidence) === JSON.stringify(clone({ first: r.first, entry: r.entry, generation: r.generation })),
+    'validate期间接力证据被改写');
+  record(phase + '-validation', validation);
+  assert(validation.status === 'passed-limited' && Object.keys(validation.checks || {}).length > 0 &&
+    Object.values(validation.checks).every(v => v === true), '候选validate未全部通过');
+  active.holdEvidence = acceptedEvidence; active.holdLg = w.__SE.journeyInfo.lg;
+  phase = active.second ? 'second-hold' : 'first-hold';
+  // Check configuration actually held the journey across two monitor render opportunities.
+  const lg = active.holdLg;
+  nextFrames(token, () => {
+    assert(w.__SE.journeyInfo.on && w.__SE.journeyInfo.lg === lg, 'candidateHold未保持接力尺度');
+    liveToken(token);
+    assert(r.first === active.acceptedFirst && r.entry === active.acceptedEntry, '保持期间接力证据被替换');
+    assert(JSON.stringify(acceptedEvidence) === JSON.stringify(clone({ first: r.first, entry: r.entry, generation: r.generation })),
+      '保持期间接力证据被原地改写');
+    assert(Object.values(handoffChecks(r)).every(v => v === true), '保持期间本轮接力检查失效');
+    if (!active.second) {
+      firstRef = r.first; entryRef = r.entry; generation = r.generation; firstFrame = r.first.frame;
+      firstEvidence = clone({ first: r.first, entry: r.entry, generation });
+    }
+    record(phase + '-stable', state());
+    const second = active.second; active = null; busy = false;
+    phase = second ? 'second-ready-stop' : 'first-ready-lg21'; offer(second ? 'finish' : 'lg21');
+  });
+}
+function scheduleRaf(fn) { waitRaf = w.requestAnimationFrame(fn); }
+function nextFrames(token, fn) {
+  scheduleRaf(() => {
+    if (dead || finished || token !== run) return;
+    try { environmentGuard(); scheduleRaf(() => {
+      if (dead || finished || token !== run) return;
+      try { environmentGuard(); fn(); liveToken(token); environmentGuard(); liveToken(token); cancelWait(); }
+      catch (e) { fail(e); }
+    }); } catch (e) { fail(e); }
+  });
+}
+function beginBudget(ms, label) {
+  cancelWait();
+  budget = { ms, label, started: performance.now(), deadline: performance.now() + ms };
+  waitTimer = setTimeout(() => {
+    if (dead || finished) return;
+    const elapsed = active ? performance.now() - active.startedMs : null;
+    record('budget-expired', { label, budgetMs: ms, actualElapsedMs: elapsed,
+      overshootMs: elapsed === null ? null : Math.max(0, elapsed - ms), snapshot: safeState() });
+    fail(Error(label + '超时（预算' + ms + 'ms）'));
+  }, ms);
+}
+function start(second) {
+  if (busy || dead || finished) return;
+  try {
+    environmentGuard(); assert(booted, '候选身份检查尚未完成');
+    assert(phase === (second ? 'stopped-first' : 'ready'), '入场阶段不合法');
+    const r = w.__RH_CANDIDATE__, s = w.__SE;
+    if (second) {
+      assert(r.first === firstRef && r.entry === entryRef && r.generation === generation, '二次起步前证据身份变化');
+      assert(JSON.stringify(clone({ first: r.first, entry: r.entry, generation })) === JSON.stringify(firstEvidence),
+        '二次起步前旧证据被原地改写');
+    }
+    busy = true; lock(); phase = second ? 'second-entry' : 'first-entry'; const token = ++run;
+    active = { second, startedMs: performance.now(), callbacks: 0, rafs: 0, lastMs: null,
+      baselineGeneration: r.generation || 0, oldFirst: r.first, oldEntry: r.entry, seekBaseline: observedSeekCalls };
+    missingSince = null; beginBudget(20000, phase);
+    const started = s.journey(); liveToken(token); environmentGuard();
+    assert(started === true, '旅程启动返回失败');
+    assert(s.journeyInfo.on && s.journeyInfo.cine && !s.journeyInfo.cs && s.journeyInfo.lg < 20,
+      '自然起步不是主场景cine');
+    record(phase + '-start', state());
+    const sample = () => {
+      if (dead || finished || token !== run) return;
+      try {
+        environmentGuard(); telemetry('raf'); checkMissingSource();
+        const fresh = r.generation !== active.baselineGeneration;
+        const staleCompleted = r.first && r.first.completed && !fresh && !second;
+        assert(!staleCompleted, '首次入场检测到旧completed证据');
+        if (fresh && r.first && r.first.completed) {
+          active.acceptedFirst = r.first; active.acceptedEntry = r.entry;
+          acceptHandoff(token); return;
+        }
+        assert(s.journeyInfo.on, '旅程已停止但没有本轮接力证据');
+        scheduleRaf(sample);
+      } catch (e) { fail(e); }
+    };
+    scheduleRaf(sample);
+  } catch (e) { fail(e); }
+}
+function stopChecked(step) {
+  environmentGuard(); const s = w.__SE, cs = s.CS, r = w.__RH_CANDIDATE__, T = s.THREE;
+  const token = run, before = state(), records = r.restores, oldRecords = records.slice(),
+    oldContent = JSON.stringify(records), length = records.length, gen = r.generation;
+  assert(s.journeyInfo.on, '停止前旅程已关闭');
+  const returned = s.journeyStop(); liveToken(token); environmentGuard();
+  const added = r.restores.slice(length);
+  const standard = new T.PerspectiveCamera(cs.cam.fov, cs.cam.aspect, cs.cam.near, cs.cam.far);
+  const maxDiff = (a, b) => a.length === b.length && a.every(Number.isFinite) && b.every(Number.isFinite)
+    ? Math.max(...a.map((v, i) => Math.abs(v - b[i]))) : Infinity;
+  const actual = cs.cam.projectionMatrix.toArray();
+  const diff = maxDiff(standard.projectionMatrix.toArray(), actual);
+  const inverse = cs.cam.projectionMatrix.clone().multiply(cs.cam.projectionMatrixInverse).toArray();
+  const inverseError = maxDiff(new T.Matrix4().toArray(), inverse);
+  const checks = { returnedTrue: returned === true, journeyOff: !s.journeyInfo.on, upCleared: cs.upCur === null,
+    standardProjection: diff < 1e-12, inverseConsistent: inverseError < 1e-10,
+    generationUnchanged: r.generation === gen,
+    historyPreserved: r.restores === records && oldRecords.every((x, i) => r.restores[i] === x) &&
+      JSON.stringify(r.restores.slice(0, length)) === oldContent,
+    freshStopRecord: added.length === 1 && !oldRecords.includes(added[0]) && added[0].reason === 'stop' &&
+      Number.isFinite(added[0].frame) && added[0].frame >= r.first.frame &&
+      maxDiff(added[0].projection || [], actual) < 1e-12 &&
+      maxDiff(added[0].inverse || [], cs.cam.projectionMatrixInverse.toArray()) < 1e-12 };
+  const after = state();
+  liveToken(token); environmentGuard(); liveToken(token);
+  assert(!s.journeyInfo.on && cs.upCur === null && !after.journey.on && after.upCur === null,
+    '停止清理失败：停止后置采样重新激活旅程或up状态');
+  record(step, { before, returned, added, checks, projectionDifference: diff, inverseError, after });
+  liveToken(token);
+  assert(Object.values(checks).every(v => v === true), '停止清理或新增记录检查失败');
+}
+async function boot() {
+  if (dead || finished) return;
+  if (booting || booted) { fail(Error('候选iframe重复load/文档重载')); return; }
+  if (loadTimer !== null) clearTimeout(loadTimer); loadTimer = null;
+  booting = true;
+  const token = run;
+  identityDeadline = performance.now() + 10000;
+  try {
+    assert(performance.now() < loadDeadline, '候选iframe加载超过绝对15秒截止时间');
+    w = frame.contentWindow; candidateDocument = w.document;
+    assert(w.__SE && w.__RH_CANDIDATE__ && w.__rhInternals, '候选接口未就绪');
+    originalSeek = w.__SE.journeySeek;
+    assert(typeof originalSeek === 'function', '缺少seek诊断接口');
+    seekWrapper = function(...args) { observedSeekCalls++; return originalSeek.apply(this, args); };
+    w.__SE.journeySeek = seekWrapper;
+    // Observable public API only; closures or code retaining the original method are not covered.
+    w.addEventListener('error', e => fail(Error('候选页面异常：' + e.message)));
+    w.addEventListener('unhandledrejection', e => fail(Error('候选未处理拒绝：' + String(e.reason))));
+    for (const target of [window, w]) {
+      target.addEventListener('pagehide', () => { if (!dead && !finished) fail(Error('页面pagehide')); });
+      target.addEventListener('hashchange', () => { if (!dead && !finished) fail(Error('URL fragment变化')); });
+    }
+    w.document.addEventListener('visibilitychange', visibility);
+    environmentGuard();
+    report.identity = { environment: liveEnvironment(), expectedIframeURL: new URL(CANDIDATE, location.href).href,
+      candidateHoldConfigured: new URL(w.location.href).searchParams.get('candidateHold') === '1',
+      moduleURLs: Array.from(w.document.querySelectorAll('script[type="module"][src]')).map(s => s.src),
+      build: w.__SE.build, title: w.document.title, clusters: w.__rhInternals.MWGC_LIST.length,
+      resources: [], fetchedBytesOnly: true };
+    assert(report.identity.candidateHoldConfigured, 'candidateHold未配置');
+    const timeout = setTimeout(() => fail(Error('身份检查超过10秒')), 10000);
+    try { for (const [url, hash] of Object.entries(EXPECTED)) await fingerprint(url, hash, token); }
+    finally { clearTimeout(timeout); }
+    if (dead || finished) return;
+    identityGuard(token);
+    environmentGuard(); booted = true; booting = false; phase = 'ready'; report.status = 'ready';
+    record('identity-ready', { identity: report.identity, state: state() }); offer('first');
+    monitorTimer = setInterval(() => {
+      if (dead || finished) return;
+      try { environmentGuard(); telemetry('watchdog'); checkMissingSource(); show(); }
+      catch (e) { fail(e); }
+    }, report.limits.monitorPeriodMs);
+  } catch (e) { fail(e); }
+}
+function visibility() {
+  if (dead || finished) return;
+  try {
+    event('visibilitychange', {});
+    // Before iframe load only the parent is known; never treat an absent candidate as visible.
+    assert(document.visibilityState === 'visible', '页面隐藏：停止采样');
+    if (w && candidateDocument) environmentGuard();
+  } catch (e) { fail(e); }
+}
+document.addEventListener('visibilitychange', visibility);
+window.addEventListener('error', e => fail(Error('面板异常：' + e.message)));
+window.addEventListener('unhandledrejection', e => fail(Error('面板未处理拒绝：' + String(e.reason))));
+frame.addEventListener('load', boot);
+$('first').onclick = () => start(false);
+$('lg21').onclick = () => {
+  if (dead || finished || busy) return;
+  try {
+    environmentGuard(); assert(phase === 'first-ready-lg21', 'lg21阶段不合法');
+    busy = true; lock(); phase = 'lg21'; const token = ++run;
+    active = { startedMs: performance.now(), callbacks: 0, rafs: 0, lastMs: null, seekCalls: 1 };
+    beginBudget(5000, 'lg21完成帧等待');
+    const seekTime = w.__RH_CANDIDATE__.cineTimeAtLg(21);
+    liveToken(token); environmentGuard(); liveToken(token);
+    const result = w.__SE.journeySeek(seekTime);
+    liveToken(token); environmentGuard();
+    assert(result && result.cs && Math.abs(result.lg - 21) < 1e-6, 'lg21定位返回失败');
+    nextFrames(token, () => {
+      assert(Math.abs(w.__SE.journeyInfo.lg - 21) < 1e-6, 'lg21没有保持');
+      const cs = w.__SE.CS, t = cs.mwRealMat && cs.mwRealMat.map;
+      record('lg21-fixed-state', { state: state(), gaia: t ? { repeat: t.repeat.toArray(), offset: t.offset.toArray(),
+        size: t.image ? [t.image.width, t.image.height] : null } : null,
+        mwRealVisible: cs.mwReal ? cs.mwReal.visible : null,
+        mwRealOpacity: cs.mwRealMat ? cs.mwRealMat.opacity : null, visualApproval: false });
+      active = null; busy = false; phase = 'lg21-ready-stop'; offer('stop');
+    });
+  } catch (e) { fail(e); }
+};
+$('stop').onclick = () => {
+  if (dead || finished || busy) return;
+  try { assert(phase === 'lg21-ready-stop', '停止阶段不合法'); lock(); stopChecked('stop-after-lg21');
+    phase = 'stopped-first'; offer('second'); } catch (e) { fail(e); }
+};
+$('second').onclick = () => start(true);
+$('finish').onclick = () => {
+  if (dead || finished || busy) return;
+  try {
+    assert(phase === 'second-ready-stop', '结束阶段不合法'); const token = run;
+    lock(); stopChecked('final-stop'); liveToken(token); environmentGuard();
+    assert(report.errors.length === 0, '存在错误，禁止提交通过终态');
+    finished = true; run++; cancelWait(); clearInterval(monitorTimer); monitorTimer = null;
+    phase = 'finished'; report.status = 'passed-limited'; report.finishedAt = new Date().toISOString();
+    record('finished', { boundedStateChecksPassed: report.errors.length === 0, visualApproval: false });
+  } catch (e) { fail(e); }
+};
+$('download').onclick = () => {
+  const u = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }));
+  const a = document.createElement('a'); a.href = u; a.download = 'rh-v4-bounded-validation-v2.json'; a.click();
+  setTimeout(() => URL.revokeObjectURL(u), 1000);
+};
+lock(); show();
+loadTimer = setTimeout(() => fail(Error('候选iframe加载超过15秒')), 15000);
+frame.src = CANDIDATE;
+</script></body></html>

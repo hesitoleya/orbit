@@ -1,0 +1,21 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Three.js winding probe</title></head><body><h1>Three.js 投影反射剔除探针</h1><pre id="result">运行中</pre><script type="module">
+import * as THREE from './js/three.module.min.js';
+const out=document.querySelector('#result');
+try {
+  const renderer=new THREE.WebGLRenderer({antialias:false,preserveDrawingBuffer:true});renderer.setSize(64,64);renderer.setPixelRatio(1);renderer.setClearColor(0x000000,1);document.body.appendChild(renderer.domElement);
+  const scene=new THREE.Scene(), camera=new THREE.PerspectiveCamera(60,1,.1,100);
+  const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute([-1,-1,-4, 1,-1,-4, 0,1,-4],3));
+  const material=new THREE.MeshBasicMaterial({color:0xff0000,side:THREE.FrontSide,toneMapped:false});scene.add(new THREE.Mesh(geometry,material));
+  const gl=renderer.getContext(), pixel=new Uint8Array(4), original=camera.projectionMatrix.clone();
+  function run(flipped,side){material.side=side;material.needsUpdate=true;camera.projectionMatrix.copy(original);if(flipped)camera.projectionMatrix.premultiply(new THREE.Matrix4().makeScale(-1,1,1));camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();renderer.render(scene,camera);gl.readPixels(32,32,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return {pixel:Array.from(pixel),error:gl.getError()};}
+  const normal=run(false,THREE.FrontSide), flipFront=run(true,THREE.FrontSide), flipBack=run(true,THREE.BackSide),restored=run(false,THREE.FrontSide);
+  const mesh=scene.children[0];
+  const faceMaterial=new THREE.ShaderMaterial({side:THREE.DoubleSide,vertexShader:'void main(){gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',fragmentShader:'void main(){gl_FragColor=gl_FrontFacing?vec4(1.,0.,0.,1.):vec4(0.,1.,0.,1.);}'});
+  mesh.material=faceMaterial;
+  function faceTrial(flipped){camera.projectionMatrix.copy(original);if(flipped)camera.projectionMatrix.premultiply(new THREE.Matrix4().makeScale(-1,1,1));camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();renderer.render(scene,camera);gl.readPixels(32,32,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return {pixel:Array.from(pixel),error:gl.getError()};}
+  const doubleNormal=faceTrial(false),doubleFlipped=faceTrial(true);
+  const pass=normal.pixel[0]>200&&flipFront.pixel[0]===0&&flipBack.pixel[0]>200&&restored.pixel[0]>200&&doubleNormal.pixel[0]>200&&doubleFlipped.pixel[1]>200&&[normal,flipFront,flipBack,restored,doubleNormal,doubleFlipped].every(v=>v.error===0);
+  out.textContent=JSON.stringify({status:pass?'PASS':'FAIL',revision:THREE.REVISION,normal,flipFront,flipBack,restored,doubleNormal,doubleFlipped,renderer:gl.getParameter(gl.RENDERER),note:'独立三角形、单相机、无 HDR 或后处理；并非生产场景回归'},null,2);document.body.dataset.status=pass?'pass':'fail';
+  geometry.dispose();material.dispose();faceMaterial.dispose();renderer.dispose();
+} catch(e){out.textContent='ERROR: '+e.message;document.body.dataset.status='error';}
+</script></body></html>

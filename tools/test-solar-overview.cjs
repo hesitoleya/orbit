@@ -1,0 +1,18 @@
+'use strict';
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const app=fs.readFileSync('public/js/app.js','utf8'),box={console};box.window=box;vm.runInNewContext(fs.readFileSync('public/js/three.min.js','utf8'),box);const T=box.THREE;
+const start=app.indexOf('function updateSunGlare(K) {'),end=app.indexOf('const POST_VS =',start),src=app.slice(start,end);
+assert(!src.includes('GLARE.uv[1] = 0.56;'));
+const camera=new T.PerspectiveCamera(55,1.6,.4,5e13);camera.updateMatrixWorld();
+const GLARE={on:true,uv:[0,0],tint:[1,1,1]},SUN={pos:new T.Vector3(0,0,-1e12)},EARTH={pos:new T.Vector3(1e11,0,-1e10),radius:6371000},MOON={pos:new T.Vector3(2e11,0,-1e10),radius:1737000};
+const ss=x=>x;const smooth=(v,a,b)=>{const t=Math.max(0,Math.min(1,(v-a)/(b-a)));return t*t*(3-2*t);};
+const observer={alt:6.6e12,focus:EARTH};
+const run=new Function('GLARE','NEB','camera','SUN','EARTH','MOON','SYS','origin','_glDir','_glPos','_glView','_t4','cam','smoothstep','R_EARTH',src+';return updateSunGlare;')(GLARE,{active:null},camera,SUN,EARTH,MOON,[],new T.Vector3(),new T.Vector3(),new T.Vector3(),new T.Vector3(),new T.Vector3(),observer,smooth,6371000);
+run(camera);assert.equal(GLARE.vis,1);assert.equal(GLARE.uv[0],.5);assert.equal(GLARE.uv[1],.5);
+SUN.pos.z=1e12;run(camera);assert.equal(GLARE.vis,0,'no glare for Sun behind camera');SUN.pos.z=-1e12;
+EARTH.pos.set(0,0,-1e10);run(camera);assert.equal(GLARE.vis,0,'planet blocks lens source');EARTH.pos.x=1e11;
+run(new T.PerspectiveCamera());assert.equal(GLARE.vis,0,'cosmic/other camera cannot inherit solar lens source');
+observer.focus=MOON;observer.alt=2.8e6;run(camera);assert.equal(GLARE.vis,1,'non-Earth closeup uses vacuum projection, never Earth terrain/LUT');
+GLARE.on=false;run(camera);assert.equal(GLARE.vis,0);
+assert(app.includes('Math.max(5e13,2*camAbs.distanceTo(SUN.pos))'));assert(app.includes('goTarget(SUN, 2.4e9, -Math.PI/2)'));
+console.log('PASS actual solar glare high-alt path: real projection, behind-camera/planet/foreign-camera/off gates; centered overview and far range contracts');

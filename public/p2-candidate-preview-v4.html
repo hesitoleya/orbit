@@ -1,0 +1,1272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
+<meta name="theme-color" content="#000308" />
+<meta name="description" content="单文件 1:1 尺度行星引擎：程序化地形、体积云、Bruneton 大气、恒星系与时间系统，从 12,500 km 连续缩放到 14 m 贴地。" />
+<link rel="icon" href="data:,">
+<title>EXPERIMENTAL CANDIDATE — SPACE·1:1 — 从地面到星际</title>
+<!-- PWA 外壳只在 http(s) 下注入：file:// 双击单文件版请求 manifest 会被 CORS 拦下，
+     控制台刷一条无意义的报错（对话 40 顺手修） -->
+<script>
+  if (/^https?:$/.test(location.protocol)) {
+    var ml = document.createElement('link');
+    ml.rel = 'manifest'; ml.href = './manifest.webmanifest';
+    document.head.appendChild(ml);
+  }
+</script>
+<link rel="apple-touch-icon" href="./icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="SPACE·1:1" />
+<style>
+    /* 对话 154：宇宙之旅播放中，把界面和标签淡出 —— 参考视频是纯画面，
+       没有任何文字；这里也保持一致（拖动即恢复）。 */
+    body.journey #ui, body.journey #labels, body.journey #cosmoLabels, body.journey #crumbs,
+    body.journey #hud, body.journey #cosmoHud, body.journey #hint, body.journey #atlasBtn { opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }
+    body.journey #atlasBtn { transition: none !important; }
+    body:not(.journey) #atlasBtn { transition: background .16s, border-color .16s, color .16s; }
+    #ui, #labels, #cosmoLabels, #crumbs { transition: opacity .45s ease; }
+    body:not(.journey) #ui:focus-within, body:not(.journey) #labels:focus-within,
+    body:not(.journey) #cosmoLabels:focus-within, body:not(.journey) #crumbs:focus-within,
+    body:not(.journey) #hud:focus-within, body:not(.journey) #cosmoHud:focus-within,
+    body:not(.journey) #hint:focus-within, body:not(.journey) #atlasBtn:focus-within { transition: none !important; }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{
+    height:100%;width:100%;overflow:hidden;background:#000308;
+    overscroll-behavior:none;touch-action:none;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    color:#e6f2f5;-webkit-font-smoothing:antialiased;
+  }
+  canvas{display:block}
+  #stage{position:fixed;inset:0;z-index:1}
+
+  #ui{position:fixed;inset:0;z-index:10;pointer-events:none;transition:opacity .45s ease}
+  #ui.hidden{opacity:0}
+  /* H 隐藏界面后，原本 pointer-events:auto 的面板必须一起失效，
+     否则会留下一块看不见却拦截点击/拖动的区域（对话 65） */
+  #ui.hidden *{pointer-events:none !important}
+
+  .brand{position:absolute;left:24px;top:20px;display:flex;align-items:center;gap:10px;user-select:none}
+  .brand .dot{width:6px;height:6px;border-radius:50%;background:#5eead4;box-shadow:0 0 10px #5eead4,0 0 22px rgba(94,234,212,.45)}
+  .brand h1{font-size:12px;font-weight:500;letter-spacing:.32em;color:#eaf7f9}
+  .brand span.tag{font-size:9px;letter-spacing:.18em;color:#4f6a76;border:1px solid rgba(255,255,255,.1);padding:3px 6px;border-radius:4px}
+
+  .scalebox{
+    position:absolute;left:24px;bottom:24px;width:290px;padding:14px 16px 12px;
+    border:1px solid rgba(158,205,215,.10);border-radius:13px;
+    background:linear-gradient(158deg,rgba(14,23,31,.66),rgba(4,9,13,.5));
+    -webkit-backdrop-filter:blur(18px) saturate(125%);backdrop-filter:blur(18px) saturate(125%);
+    user-select:none;
+  }
+  .scalebox .lbl{font-size:9.5px;letter-spacing:.26em;color:#5b7480}
+  .scalebox .big{display:flex;align-items:baseline;gap:7px;margin-top:5px}
+  .scalebox .big b{font-size:25px;font-weight:600;color:#f2fbfd;font-variant-numeric:tabular-nums}
+  .scalebox .big i{font-style:normal;font-size:11px;color:#7d9aa5}
+  .scalebox .sub{margin-top:3px;font-size:10.5px;color:#6d8792;letter-spacing:.03em}
+
+  .logbar{margin-top:11px;height:24px;position:relative}
+  .logbar .track{position:absolute;left:0;right:0;top:8px;height:2px;border-radius:2px;
+    background:linear-gradient(90deg,rgba(94,234,212,.55),rgba(94,234,212,.12) 55%,rgba(255,255,255,.06))}
+  .logbar .tick{position:absolute;top:4px;width:1px;height:10px;background:rgba(255,255,255,.13)}
+  .logbar .mark{position:absolute;top:1px;width:2px;height:16px;border-radius:1px;background:#5eead4;box-shadow:0 0 10px #5eead4;transition:left .1s linear}
+  .logbar .caps{position:absolute;left:0;right:0;top:17px;display:flex;justify-content:space-between;font-size:8px;color:#41545e;letter-spacing:.1em}
+
+  .dockcol{
+    position:absolute;right:24px;bottom:24px;display:flex;flex-direction:column;
+    align-items:flex-end;pointer-events:none;
+  }
+  .bar{
+    display:flex;gap:4px;padding:5px;border-radius:14px;
+    border:1px solid rgba(255,255,255,.08);background:rgba(6,12,17,.62);
+    -webkit-backdrop-filter:blur(16px) saturate(130%);backdrop-filter:blur(16px) saturate(130%);
+    pointer-events:auto;
+  }
+  .chip{
+    appearance:none;border:1px solid transparent;background:transparent;font-family:inherit;
+    color:#a3bcc6;font-size:11.5px;letter-spacing:.14em;padding:8px 14px;border-radius:10px;
+    cursor:pointer;transition:color .18s,background .18s,border-color .18s;
+  }
+  .chip:hover{color:#e6f7fa;background:rgba(255,255,255,.05)}
+  .chip.on{color:#d3fff7;background:rgba(94,234,212,.1);border-color:rgba(94,234,212,.24)}
+
+  .pop{
+    position:absolute;right:0;bottom:calc(100% + 10px);min-width:352px;
+    padding:12px 14px 10px;border-radius:14px;display:none;
+    border:1px solid rgba(158,205,215,.12);
+    background:linear-gradient(160deg,rgba(14,23,31,.92),rgba(5,10,14,.88));
+    -webkit-backdrop-filter:blur(20px) saturate(130%);backdrop-filter:blur(20px) saturate(130%);
+    box-shadow:0 18px 48px rgba(0,0,0,.55);
+    pointer-events:auto;
+  }
+  .pop.open{display:block;animation:popin .16s ease}
+  @keyframes popin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .prow{display:flex;align-items:center;gap:10px;padding:5px 0}
+  .plbl{flex:0 0 46px;font-size:9.5px;letter-spacing:.18em;color:#4f6a76}
+  .pbtns{display:flex;gap:2px;flex-wrap:wrap}
+  .pbtns.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;flex:1}
+  .pbtns.grid3 .btn{text-align:center;padding:7px 4px}
+  .pval{font-size:11px;color:#8fa8b2;font-variant-numeric:tabular-nums}
+  .pkeys{margin:9px 0 3px;padding-top:9px;border-top:1px solid rgba(255,255,255,.07);
+    font-size:10px;line-height:1.95;color:#5d7681;letter-spacing:.04em}
+  .pkeys b{color:#9fbac4;font-weight:500}
+  .btn{
+    appearance:none;border:1px solid transparent;background:transparent;font-family:inherit;
+    color:#a3bcc6;font-size:11.5px;letter-spacing:.05em;padding:7px 10px;border-radius:9px;
+    cursor:pointer;white-space:nowrap;transition:color .2s,background .2s,border-color .2s;
+  }
+  .btn:hover{color:#e6f7fa;background:rgba(255,255,255,.05)}
+  .btn.on{color:#d3fff7;background:rgba(94,234,212,.1);border-color:rgba(94,234,212,.24)}
+  .btn.wide{width:100%;text-align:center;color:#8ea6b0;border-color:rgba(255,255,255,.09)}
+  input[type=range]{
+    -webkit-appearance:none;appearance:none;flex:1;height:3px;border-radius:2px;
+    background:rgba(255,255,255,.14);outline:none;cursor:pointer;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;width:12px;height:12px;border-radius:50%;
+    background:#5eead4;box-shadow:0 0 10px rgba(94,234,212,.55);
+  }
+
+  .hint{
+    position:absolute;right:24px;top:22px;text-align:right;font-size:10px;line-height:1.9;
+    color:#48606b;letter-spacing:.06em;user-select:none;
+  }
+  .hint b{color:#7f9ca7;font-weight:400}
+
+  #perfpanel{
+    position:fixed;left:24px;top:58px;z-index:30;width:262px;padding:10px 12px 9px;
+    border-radius:12px;border:1px solid rgba(158,205,215,.12);
+    background:linear-gradient(160deg,rgba(10,18,24,.82),rgba(4,9,13,.78));
+    -webkit-backdrop-filter:blur(14px) saturate(120%);backdrop-filter:blur(14px) saturate(120%);
+    font-variant-numeric:tabular-nums;user-select:none;pointer-events:none;
+    opacity:0;transform:translateY(-6px);transition:opacity .2s ease,transform .2s ease;
+  }
+  #perfpanel.on{opacity:1;transform:none}
+  #perfpanel .pfhead{display:flex;justify-content:space-between;align-items:baseline;
+    font-size:8.5px;letter-spacing:.24em;color:#4f6a76;margin-bottom:6px}
+  #perfpanel .pfhead i{font-style:normal;letter-spacing:.1em;color:#3d525c}
+  #pfGraph{display:block;width:100%;height:40px;border-radius:6px;background:rgba(255,255,255,.03)}
+  #perfpanel .pgrid{display:grid;grid-template-columns:auto 1fr auto 1fr;gap:2px 8px;margin-top:7px;font-size:10px}
+  #perfpanel .pgrid span{color:#54707c;letter-spacing:.1em}
+  #perfpanel .pgrid b{color:#b9d6de;font-weight:500;text-align:left}
+  #labels{position:fixed;inset:0;z-index:28;pointer-events:none;overflow:hidden}
+  #labels .lb{
+    position:absolute;transform:translate(-50%,-50%);white-space:nowrap;
+    font-size:10.5px;letter-spacing:.14em;color:#d7ecf3;
+    text-shadow:0 0 6px #000,0 0 12px #000,0 0 18px rgba(0,0,0,.7);
+    opacity:0;transition:opacity .2s ease;
+  }
+  #labels .lb.on{opacity:.92}
+  #labels .lb i{
+    display:inline-block;width:4px;height:4px;border-radius:50%;margin-right:5px;
+    background:#9fe8dd;box-shadow:0 0 6px #9fe8dd;vertical-align:middle;
+  }
+
+  #toast{
+    position:fixed;left:50%;bottom:104px;z-index:60;transform:translate(-50%,10px);
+    padding:9px 16px;border-radius:10px;font-size:11.5px;letter-spacing:.06em;
+    color:#dff9f4;background:rgba(10,20,26,.82);border:1px solid rgba(94,234,212,.22);
+    box-shadow:0 10px 30px rgba(0,0,0,.5);backdrop-filter:blur(12px);
+    opacity:0;pointer-events:none;transition:opacity .28s ease,transform .28s ease;
+  }
+  #toast.on{opacity:1;transform:translate(-50%,0)}
+  .pstat{
+    margin-top:6px;padding:6px 8px;border-radius:8px;
+    background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.05);
+    font-size:10px;letter-spacing:.06em;color:#7d97a2;font-variant-numeric:tabular-nums;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .pstat b{color:#a8d8d0;font-weight:500}
+  #loader{position:fixed;inset:0;z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:18px;background:#000308;transition:opacity .8s ease;pointer-events:none}
+  #loader.done{opacity:0}
+  #loader .lg{font-size:12px;letter-spacing:.5em;color:#c9ece7;text-indent:.5em}
+  #loader .lt{font-size:9.5px;letter-spacing:.24em;color:#3f5560}
+  #loader .lbar{width:170px;height:1px;background:rgba(255,255,255,.08);position:relative;overflow:hidden}
+  #loader .lbar i{position:absolute;left:-40%;top:0;width:40%;height:100%;
+    background:linear-gradient(90deg,rgba(94,234,212,0),#5eead4,rgba(94,234,212,0));animation:ld 1.1s cubic-bezier(.6,0,.4,1) infinite}
+  /* 对话 76：拿到真实建块进度后切成确定进度条（没拿到之前仍是扫描动画） */
+  #loader.prog .lbar i{left:0;width:var(--p,0%);animation:none;transition:width .2s ease;
+    background:linear-gradient(90deg,rgba(94,234,212,.30),#5eead4)}
+  @keyframes ld{0%{left:-40%}100%{left:100%}}
+
+  /* 对话 75：窄屏抽屉开关（桌面不显示，行为零变化） */
+  #navToggle{display:none;position:fixed;right:12px;top:12px;z-index:36;pointer-events:auto;
+    align-items:center;gap:8px;padding:7px 12px 7px 10px;border-radius:20px;
+    border:1px solid rgba(158,205,215,.18);background:rgba(6,12,16,.62);color:#cfe7ee;
+    font:inherit;font-size:11px;letter-spacing:.12em;cursor:pointer;
+    -webkit-backdrop-filter:blur(12px) saturate(120%);backdrop-filter:blur(12px) saturate(120%);
+    transition:color .15s ease,border-color .15s ease,background .15s ease}
+  #navToggle i{width:12px;height:8px;position:relative;display:block}
+  #navToggle i::before,#navToggle i::after,#navToggle i{background:none}
+  #navToggle i::before,#navToggle i::after{content:"";position:absolute;left:0;right:0;height:1.5px;
+    border-radius:1px;background:#9fc3cd;transition:transform .2s ease,top .2s ease,opacity .2s ease}
+  #navToggle i::before{top:0}
+  #navToggle i::after{top:6px}
+  #navToggle.on i::before{top:3px;transform:rotate(45deg)}
+  #navToggle.on i::after{top:3px;transform:rotate(-45deg)}
+  #navToggle:hover{color:#eaf7f9;border-color:rgba(94,234,212,.4)}
+  #navToggle.on{color:#bff5ea;border-color:rgba(94,234,212,.45);background:rgba(94,234,212,.12)}
+
+  @media (max-width:820px){
+    .brand{left:14px;top:14px}
+    .hint{display:none}
+    .scalebox{left:12px;right:12px;bottom:66px;width:auto;padding:11px 13px 10px}
+    .scalebox .big b{font-size:21px}
+    .dockcol{left:8px;right:8px;bottom:8px;align-items:stretch}
+    .bar{justify-content:center}
+    .chip{padding:8px 11px;letter-spacing:.08em}
+    .pop{min-width:0;left:0;right:0}
+    .btn{padding:8px 9px;font-size:11px}
+  }
+
+  /* 对话 55：导航面包屑（地球 / 太阳系 / 银河系 / 宇宙） */
+  #crumb{position:fixed;left:50%;top:16px;transform:translateX(-50%);z-index:40;
+    display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:20px;
+    border:1px solid rgba(158,205,215,.12);background:rgba(6,12,16,.55);
+    -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);font-size:10px;letter-spacing:.08em}
+  #crumb span{color:#3d525c}
+  #crumb button{border:0;background:transparent;color:#7d97a2;font:inherit;cursor:pointer;
+    padding:2px 4px;border-radius:6px;transition:color .15s ease,background .15s ease}
+  #crumb button:hover{color:#d7ecf3}
+  #crumb button.on{color:#5eead4;background:rgba(94,234,212,.10)}
+
+  /* 对话 54：天体浏览器（搜索 + 分类 + 列表 + 详情卡） */
+  #nav{
+    position:fixed;left:22px;top:64px;bottom:170px;width:262px;z-index:35;
+    /* #ui 整体是 pointer-events:none，这里必须显式恢复，否则搜索框、分类、
+       列表全部点不到（点击穿透到 canvas）——对话 65 用户反馈「用不了」的根因 */
+    pointer-events:auto;
+    display:flex;flex-direction:column;border-radius:14px;overflow:hidden;
+    border:1px solid rgba(158,205,215,.13);
+    background:linear-gradient(165deg,rgba(10,18,24,.84),rgba(4,9,13,.78));
+    -webkit-backdrop-filter:blur(16px) saturate(120%);backdrop-filter:blur(16px) saturate(120%);
+  }
+  #nav .bh{display:flex;align-items:baseline;justify-content:space-between;padding:12px 13px 8px}
+  #nav .bh b{font-size:10px;letter-spacing:.22em;color:#8fb3bd;font-weight:500}
+  #nav .bh i{font-style:normal;font-size:9px;color:#4f6a76;letter-spacing:.1em}
+  #nav .bs{padding:0 11px 8px}
+  #nav input{width:100%;box-sizing:border-box;padding:7px 10px;border-radius:8px;
+    border:1px solid rgba(158,205,215,.14);background:rgba(255,255,255,.035);
+    color:#d7ecf3;font:inherit;font-size:11px;outline:none;letter-spacing:.04em}
+  #nav input::placeholder{color:#4f6a76}
+  #nav input:focus{border-color:rgba(94,234,212,.42);background:rgba(94,234,212,.05)}
+  #nav .bc{display:flex;gap:4px;padding:0 11px 9px;flex-wrap:wrap}
+  #nav .bc button{padding:3px 6px;border-radius:20px;border:1px solid rgba(158,205,215,.14);
+    background:transparent;color:#7d97a2;font:inherit;font-size:9px;letter-spacing:.03em;cursor:pointer}
+  #nav .bc button.on{background:rgba(94,234,212,.13);border-color:rgba(94,234,212,.4);color:#bff5ea}
+  #nav .bl{flex:1;overflow:auto;padding:0 7px 6px}
+  #nav .bi{display:flex;justify-content:space-between;align-items:baseline;gap:8px;width:100%;
+    padding:6px 8px;margin:1px 0;border:0;border-radius:7px;background:transparent;
+    color:#c3d9e0;font:inherit;font-size:11px;text-align:left;cursor:pointer;
+    transition:background .15s ease,color .15s ease}
+  #nav .bi:hover{background:rgba(94,234,212,.09);color:#eafffb}
+  #nav .bi.on{background:rgba(94,234,212,.14);color:#eafffb}
+  #nav .bi.gen{margin-bottom:4px;color:#5eead4;border:1px dashed rgba(94,234,212,.28);background:rgba(94,234,212,.05)}
+  #nav .bi.gen:hover{background:rgba(94,234,212,.14);color:#eafffb}
+  #nav .bi.gen i{color:rgba(94,234,212,.55)}
+  #nav .bi i{font-style:normal;font-size:9px;color:#54707c;letter-spacing:.06em;white-space:nowrap}
+  #nav .bd{border-top:1px solid rgba(158,205,215,.10);padding:8px 13px 10px;
+    min-height:54px;max-height:68%;overflow:auto;flex:0 1 auto}
+  #nav .bd::-webkit-scrollbar{width:5px}
+  #nav .bd::-webkit-scrollbar-thumb{background:rgba(94,234,212,.18);border-radius:3px}
+  #nav .bd .dn{font-size:12.5px;color:#eafffb;letter-spacing:.05em}
+  #nav .bd .dt{font-size:9px;letter-spacing:.16em;color:#5eead4;margin-top:3px}
+  #nav .bd .dd{font-size:10px;color:#7d97a2;margin-top:5px;line-height:1.55}
+  #nav .bd .dx{font-size:9px;color:#54707c;margin-top:4px;letter-spacing:.05em}
+  /* 对话 59：轨道小图 + 可居住带 */
+  #nav .bd canvas{display:block;width:100%;height:66px;margin-top:6px;border-radius:8px;
+    border:1px solid rgba(158,205,215,.10);background:rgba(3,8,12,.65)}
+  #nav .bd .hz{font-size:9px;color:#5eead4;margin-top:5px;letter-spacing:.04em}
+  #nav .bd .hz.out{color:#7d97a2}
+  #nav .bd .hzp{font-size:9px;color:#54707c;margin-top:2px;letter-spacing:.03em}
+  #nav .bl::-webkit-scrollbar{width:6px}
+  #nav .bl::-webkit-scrollbar-thumb{background:rgba(94,234,212,.18);border-radius:3px}
+  /* ---------- 对话 118：左侧浏览器可收起（桌面 + 移动端共用一套状态） ---------- */
+  #nav{transition:opacity .18s ease,transform .18s ease}
+  #nav:not(.open){opacity:0;transform:translateX(-10px);pointer-events:none}
+  #nav .bh{gap:8px}
+  #nav .ncol{flex:0 0 auto;appearance:none;width:20px;height:20px;display:grid;place-items:center;
+    border:1px solid rgba(158,205,215,.14);background:transparent;color:#7d97a2;
+    border-radius:6px;cursor:pointer;font:inherit;font-size:11px;line-height:1;padding:0}
+  #nav .ncol:hover{color:#d7ecf3;border-color:rgba(94,234,212,.42);background:rgba(94,234,212,.08)}
+  /* 收起后，左上角用「天体」药丸重新打开（桌面端平时不显示这个按钮） */
+  body.nav-closed #navToggle{display:inline-flex}
+  @media (min-width:821px){
+    #navToggle{left:22px;top:64px;right:auto}
+    #navToggle span{display:inline}
+  }
+  /* ---------- 对话 120：穿梭过场时 HUD 淡出，回到画面本体 ---------- */
+  body.warping #nav, body.warping #crumb, body.warping .brand, body.warping .hint,
+  body.warping .scalebox, body.warping .dockcol, body.warping #cosmoLabels,
+  body.warping #labels, body.warping #cosmoHud {
+    /* !important 是必须的：天体浏览器有 #nav.open{opacity:1} 之类的状态规则，
+       后面还会被 JS 改内联样式，只靠特异性会输（实测类加上了却不生效）。 */
+    opacity:0!important; transition:opacity .16s ease; pointer-events:none!important }
+  /* ---------- 对话 119：特写模式隐藏主 HUD，只留 #bhUI ---------- */
+  body.bh-mode #nav, body.bh-mode #crumb, body.bh-mode .brand, body.bh-mode .hint,
+  body.bh-mode .scalebox, body.bh-mode .dockcol, body.bh-mode #navToggle,
+  body.bh-mode #cosmoLabels, body.bh-mode #labels {display:none!important}
+  /* ---------- 对话 119：黑洞特写覆盖层 ---------- */
+  #bhUI{position:fixed;inset:0;z-index:38;pointer-events:none;display:none}
+  #bhUI.on{display:block}
+  #bhUI .bhTop{position:absolute;left:26px;top:70px}
+  #bhUI .bhK{font-size:9px;letter-spacing:.26em;color:#5eead4;opacity:.85}
+  #bhUI h3{margin:7px 0 5px;font-size:21px;font-weight:500;color:#eaf7f9;letter-spacing:.05em}
+  #bhUI .bhMeta{font-size:10.5px;color:#93adb8;letter-spacing:.05em;line-height:1.7}
+  #bhUI .bhBot{position:absolute;right:24px;bottom:24px;display:flex;align-items:center;gap:14px;pointer-events:auto}
+  #bhUI .bhHint{font-size:10px;color:#6b8695;letter-spacing:.08em}
+  #bhUI .bhExit{appearance:none;border:1px solid rgba(158,205,215,.2);background:rgba(8,16,22,.72);
+    color:#cfe6ee;font:inherit;font-size:11px;letter-spacing:.12em;padding:8px 15px;border-radius:10px;
+    cursor:pointer;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+  #bhUI .bhExit:hover{color:#eafffb;border-color:rgba(94,234,212,.45);background:rgba(94,234,212,.12)}
+  @media (max-width:820px){
+    #bhUI .bhTop{left:14px;top:56px}
+    #bhUI h3{font-size:16px}
+    #bhUI .bhBot{left:12px;right:12px;bottom:14px;justify-content:space-between}
+    #bhUI .bhHint{font-size:9px}
+  }
+  /* ---------- 对话 118：底部工具条可收起 ---------- */
+  .dockcol.min .bar .chip:not(#dockToggle){display:none}
+  .dockcol.min .bar{padding:4px}
+  #dockToggle{color:#7d97a2}
+  #dockToggle:hover{color:#e6f7fa}
+  /* ---------- 对话 75：窄屏布局（必须放在所有基础规则之后：同权重按顺序覆盖，
+     早期那条 @media 在 #nav / #crumb 定义之前，压不住它们的 width/pointer-events） ---------- */
+  @media (max-width:820px){
+    .brand{left:12px;top:13px}
+    .brand span.tag{display:none}
+    .brand h1{font-size:11px;letter-spacing:.24em}
+    #navToggle{display:inline-flex}
+    #crumb{top:46px;left:50%;font-size:9px;padding:4px 9px;gap:4px;white-space:nowrap}
+    /* 抽屉：默认收起。262px 固定面板在 390px 宽的手机上占掉 2/3 屏 */
+    #nav{left:8px;right:8px;top:80px;bottom:190px;width:auto;z-index:34;
+      opacity:0;transform:translateY(-6px);pointer-events:none;
+      transition:opacity .16s ease,transform .16s ease}
+    #nav.open{opacity:1;transform:none;pointer-events:auto}
+    .scalebox{bottom:74px}
+    /* 抽屉/刻度框全宽铺在底部，提示条要抬到它们上面 */
+    #updbar{bottom:236px;font-size:10px}
+  }
+  /* ---------- 对话 79：转场遮罩 ---------- */
+  #fade{position:fixed;inset:0;z-index:90;background:#000308;opacity:0;pointer-events:none;
+    transition:opacity .18s linear;will-change:opacity}
+
+  /* ---------- 对话 76：致命错误兜底 / 更新提示 ---------- */
+  #fatal{position:fixed;inset:0;z-index:200;display:none;place-items:center;background:#000308;
+    color:#dbeaf0;padding:24px;text-align:center}
+  #fatal.on{display:grid}
+  #fatal h2{font-size:14px;font-weight:500;letter-spacing:.2em;color:#eaf7f9;margin:0 0 12px}
+  #fatal p{font-size:12px;line-height:1.75;color:#7f97a3;max-width:460px;margin:0 auto 8px;word-break:break-word}
+  #fatal .fbtns{display:flex;gap:10px;justify-content:center;margin:18px 0 12px}
+  #fatal button{padding:8px 18px;border-radius:20px;border:1px solid rgba(94,234,212,.35);
+    background:rgba(94,234,212,.10);color:#bff5ea;font:inherit;font-size:11px;letter-spacing:.1em;cursor:pointer}
+  #fatal button:hover{background:rgba(94,234,212,.18)}
+  #fatal .fhint{font-size:10px;line-height:1.6;color:#4b626d}
+
+  #updbar{position:fixed;left:50%;bottom:84px;transform:translateX(-50%);z-index:60;
+    display:none;align-items:center;gap:12px;padding:8px 8px 8px 16px;border-radius:22px;
+    border:1px solid rgba(94,234,212,.32);background:rgba(6,16,20,.92);
+    -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);
+    font-size:11px;letter-spacing:.08em;color:#cfe7ee;white-space:nowrap}
+  #updbar.on{display:flex}
+  #updbar button{padding:6px 14px;border-radius:16px;border:0;background:#5eead4;color:#04231f;
+    font:inherit;font-size:11px;letter-spacing:.1em;cursor:pointer}
+
+  /* 设置面板底部：版本 / GPU */
+  .pver{margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.05);
+    font-size:9.5px;line-height:1.7;letter-spacing:.06em;color:#4f6a76;word-break:break-all}
+  .pver b{color:#8fb3bd;font-weight:500}
+  /* ---------- 对话 83：摄影模式 ---------- */
+  body.photo #ui{opacity:0;pointer-events:none;transition:opacity .25s ease}
+  body.photo #labels{opacity:0;transition:opacity .25s ease}
+  body.photo #perfpanel{display:none}
+  #photoExit{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:70;display:none;
+    align-items:center;gap:10px;padding:7px 8px 7px 16px;border-radius:20px;
+    border:1px solid rgba(158,205,215,.18);background:rgba(6,12,16,.72);color:#cfe7ee;
+    font-size:11px;letter-spacing:.08em;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+  body.photo #photoExit{display:flex}
+  #photoExit button{padding:5px 12px;border:0;border-radius:14px;background:#5eead4;color:#04231f;
+    font:inherit;font-size:10.5px;letter-spacing:.1em;cursor:pointer}
+
+  /* ---------- 对话 81：首次引导 / 帮助卡 ---------- */
+  /* 遮罩不挡指针：引导期间用户可以直接动手试（拖/滚轮照常生效），只在卡片上接管 */
+  #tour{position:fixed;inset:0;z-index:120;display:none;align-items:flex-end;justify-content:center;
+    padding:0 20px 96px;pointer-events:none;
+    background:radial-gradient(120% 90% at 50% 40%,rgba(0,0,0,0) 30%,rgba(0,4,8,.55) 100%)}
+  #tour .tcard{pointer-events:auto}
+  #tour.on{display:flex}
+  #tour .tcard{width:min(460px,100%);padding:18px 20px 16px;border-radius:16px;
+    border:1px solid rgba(94,234,212,.22);background:rgba(7,14,19,.90);
+    -webkit-backdrop-filter:blur(18px) saturate(130%);backdrop-filter:blur(18px) saturate(130%);
+    box-shadow:0 18px 60px rgba(0,0,0,.55);animation:tourIn .28s cubic-bezier(.2,.8,.2,1)}
+  @keyframes tourIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  #tour .tstep{font-size:9.5px;letter-spacing:.22em;color:#5f8b93;margin-bottom:8px}
+  #tour h3{margin:0 0 8px;font-size:15px;font-weight:500;letter-spacing:.06em;color:#eaf7f9}
+  #tour p{margin:0;font-size:12px;line-height:1.85;color:#93aab4}
+  #tour p b{color:#bff5ea;font-weight:400}
+  #tour .tdots{display:flex;gap:6px;margin:14px 0 0}
+  #tour .tdots i{width:5px;height:5px;border-radius:50%;background:rgba(159,195,205,.28);transition:background .2s ease,transform .2s ease}
+  #tour .tdots i.on{background:#5eead4;transform:scale(1.25)}
+  #tour .tbtns{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+  #tour button,#help button{font:inherit;font-size:11px;letter-spacing:.1em;cursor:pointer;border-radius:16px}
+  #tour .skip{padding:7px 14px;border:0;background:none;color:#6d8791}
+  #tour .skip:hover{color:#a9c4cc}
+  #tour .next{padding:7px 18px;border:0;background:#5eead4;color:#04231f}
+  #tour .next:hover{background:#7df0dc}
+
+  #help{position:fixed;inset:0;z-index:130;display:none;align-items:center;justify-content:center;
+    padding:24px;background:rgba(0,3,7,.62);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+  #help.on{display:flex}
+  #help .hcard{width:min(560px,100%);max-height:min(86vh,700px);overflow:auto;padding:20px 22px 14px;
+    scrollbar-width:thin;scrollbar-color:rgba(94,234,212,.32) transparent;overscroll-behavior:contain;
+    border-radius:18px;border:1px solid rgba(158,205,215,.18);
+    background:linear-gradient(160deg,rgba(10,18,24,.96),rgba(5,10,14,.96));
+    box-shadow:0 24px 80px rgba(0,0,0,.6)}
+  #help .hhd{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:4px}
+  #help h3{margin:0;font-size:14px;font-weight:500;letter-spacing:.18em;color:#eaf7f9}
+  #help .hclose{border:0;background:none;color:#6d8791;font-size:18px;line-height:1;padding:4px 6px}
+  #help .hclose:hover{color:#cfe7ee}
+  #help .hsub{font-size:10px;letter-spacing:.08em;color:#5c757f;margin-bottom:10px}
+  #help .hgrp{font-size:9.5px;letter-spacing:.2em;color:#4f6a76;margin:11px 0 5px}
+  #help table{width:100%;border-collapse:collapse}
+  #help td{padding:4px 0;font-size:11.5px;color:#93aab4;vertical-align:top;line-height:1.6}
+  #help .hcard::-webkit-scrollbar{width:6px}
+  #help .hcard::-webkit-scrollbar-thumb{background:rgba(94,234,212,.28);border-radius:6px}
+  #help .hcard::-webkit-scrollbar-track{background:transparent}
+  /* 键盘 11 行竖排太高（窗口矮时只能看到一半），改成两列规格表 */
+  #help .kgrid{display:grid;grid-template-columns:1fr 1fr;gap:1px 20px}
+  #help .kgrid > div{display:flex;align-items:baseline;gap:8px;padding:3px 0;font-size:11.5px;color:#93aab4;line-height:1.55}
+  #help .kgrid .kk{min-width:84px;white-space:nowrap;color:#cfe7ee}
+  @media (max-width:560px){ #help .kgrid{grid-template-columns:1fr} }
+  #help td.k{width:132px;color:#cfe7ee;white-space:nowrap}
+  #help kbd{display:inline-block;min-width:16px;padding:1px 6px;margin-right:3px;border-radius:5px;
+    border:1px solid rgba(158,205,215,.22);background:rgba(255,255,255,.045);
+    font:inherit;font-size:10px;letter-spacing:.06em;color:#d8ecf2;text-align:center}
+  #help .hfoot{margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06);
+    font-size:9.5px;line-height:1.7;letter-spacing:.06em;color:#4f6a76}
+  #help .hfoot b{color:#8fb3bd;font-weight:400}
+
+  @media (max-width:820px){
+    /* 底部要给刻度框（bottom:74 + 约 110 高）让位，否则卡片会压住它 */
+    #tour{padding:0 12px 220px}
+    #tour .tcard{padding:16px 16px 14px}
+    #help{padding:14px}
+    #help .hcard{padding:18px 16px 14px;max-height:82vh}
+    #help td.k{width:104px}
+  }
+  /* ---------- 对话 88：键盘焦点可见 ----------
+     原来只有 #nav input:focus 一条，Tab 到按钮/滑块上完全看不出焦点在哪。
+     用 :focus-visible 而不是 :focus —— 鼠标点击不显示描边，键盘操作才显示。 */
+  :focus-visible{outline:2px solid #5eead4;outline-offset:2px;border-radius:4px}
+  /* #nav input 自己写了 outline:none（ID+元素，特异性 1,0,1），所以这里必须
+     把 outline 整个写回来 —— 只改 offset 不够（实测计算值是 3px none） */
+  #nav input:focus-visible{outline:2px solid #5eead4;outline-offset:0}
+  #fatal button:focus-visible,#tour button:focus-visible,#help button:focus-visible{outline-color:#7df0dc}
+
+  /* ---- 对话 94：宇宙尺度 HUD / 星系标签 ---- */
+  #cosmoHud{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:36;
+    min-width:340px;padding:13px 20px 12px;border:1px solid rgba(158,205,215,.10);border-radius:13px;
+    background:linear-gradient(158deg,rgba(14,23,31,.72),rgba(4,9,13,.56));
+    -webkit-backdrop-filter:blur(18px) saturate(125%);backdrop-filter:blur(18px) saturate(125%);
+    display:none;user-select:none;text-align:center}
+  body.cosmic #cosmoHud{display:block}
+  body.cosmic .scalebox{display:none}
+  #cosmoHud .cs-lbl{font-size:9px;letter-spacing:.26em;color:#5b7480}
+  #cosmoHud .cs-big{display:flex;align-items:baseline;gap:8px;justify-content:center;margin-top:4px}
+  #cosmoHud .cs-big b{font-size:26px;font-weight:600;color:#f2fbfd;font-variant-numeric:tabular-nums}
+  #cosmoHud .cs-big i{font-style:normal;font-size:11px;color:#7d9aa5}
+  #cosmoHud .cs-bar{position:relative;height:26px;margin-top:8px}
+  #cosmoHud .cs-bar .tr{position:absolute;left:0;right:0;top:8px;height:2px;border-radius:2px;
+    background:linear-gradient(90deg,rgba(94,234,212,.5),rgba(122,160,255,.35) 55%,rgba(255,190,120,.35))}
+  #cosmoHud .cs-bar .mk{position:absolute;top:3px;width:2px;height:12px;border-radius:1px;background:#5eead4;
+    box-shadow:0 0 8px rgba(94,234,212,.8)}
+  #cosmoHud .cs-bar .caps{position:absolute;left:0;right:0;top:16px;display:flex;justify-content:space-between;
+    font-size:8.5px;color:#5b7480;letter-spacing:.04em}
+
+  #cosmoLabels{position:fixed;inset:0;z-index:27;pointer-events:none;overflow:hidden;display:none}
+  body.cosmic #cosmoLabels{display:block}
+  #cosmoLabels .clbl{position:absolute;transform:translate(-50%,-150%);pointer-events:auto;cursor:pointer;
+    font-size:10.5px;letter-spacing:.03em;color:#cfe6ee;text-shadow:0 1px 6px rgba(0,0,0,.95);
+    padding:1px 5px;border-radius:5px;background:rgba(8,16,22,.16);white-space:nowrap;
+    transition:color .12s,background .12s}
+  #cosmoLabels .clbl:hover{color:#5eead4;background:rgba(8,24,28,.85)}
+  /* 对话 103：大尺度结构标签 —— 主名 + 距离副行，带一点结构色 */
+  #cosmoLabels .clbl.cos{transform:translate(-50%,-140%);color:#dff0ff;
+    border:1px solid rgba(126,178,224,.22);background:rgba(6,14,24,.42)}
+  #cosmoLabels .clbl.cos b{font-weight:600}
+  #cosmoLabels .clbl.cos s{display:block;text-decoration:none;font-size:9px;
+    color:#8fb4cf;letter-spacing:.04em;text-align:center;font-weight:400}
+  /* 对话 140：球状星团标签 —— 比结构标签更小更淡（年老恒星的暖黄），
+     只在相机靠近、星团本身能被看清时才出现 */
+  #cosmoLabels .clbl.gc{transform:translate(-50%,-130%);font-size:9.5px;color:#efd9ae;
+    letter-spacing:.02em;background:rgba(12,9,4,.20);padding:0 4px;border-radius:4px}
+  #cosmoLabels .clbl.gc:hover{color:#ffe9b8;background:rgba(32,22,8,.86)}
+  /* 对话 140：银河系自身的标签 —— 比普通星系更亮一档，它在这层是主角 */
+  #cosmoLabels .clbl.mw{transform:translate(-50%,-155%);font-size:11px;font-weight:600;
+    color:#eaf5ff;background:rgba(10,22,34,.52);border:1px solid rgba(126,178,224,.30);
+    padding:1px 7px}
+
+  /* ---- 对话 97：星云面板 ---- */
+  .nebtop{display:flex;justify-content:space-between;align-items:baseline;
+    margin-bottom:6px;padding-bottom:5px;border-bottom:1px solid rgba(158,205,215,.10)}
+  .nebtop b{font-size:11px;font-weight:600;color:#e6f6fa;letter-spacing:.04em}
+  .nebtop span{font-size:9px;color:#5b7480;letter-spacing:.05em}
+  #nebList{display:flex;flex-direction:column;gap:3px;max-height:238px;overflow:auto}
+  #nebList button{display:flex;justify-content:space-between;align-items:baseline;gap:8px;
+    width:100%;padding:5px 9px;border-radius:7px;border:1px solid rgba(158,205,215,.10);
+    background:rgba(255,255,255,.028);color:#cfe6ee;font:inherit;font-size:10.5px;
+    cursor:pointer;text-align:left;transition:background .12s,color .12s,border-color .12s}
+  #nebList button:hover{background:rgba(94,234,212,.14);color:#5eead4;border-color:rgba(94,234,212,.35)}
+  #nebList button b{font-weight:500}
+  #nebList button i{font-style:normal;font-size:9px;color:#5b7480;white-space:nowrap}
+  #nebList button.on{background:rgba(94,234,212,.18);color:#7df0dc;border-color:rgba(94,234,212,.5)}
+
+  /* ---------- 对话 111：大尺度结构详情卡 ---------- */
+  /* 挂在 #cosmoLabels 里：body.cosmic 才显示，退出宇宙层自动收起 */
+  #cosCard{position:absolute;right:16px;top:74px;width:min(300px,calc(100vw - 32px));
+    max-height:calc(100vh - 150px);overflow:auto;display:none;pointer-events:auto;
+    border:1px solid rgba(120,190,220,.26);border-radius:12px;
+    background:rgba(6,14,22,.90);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+    box-shadow:0 12px 40px rgba(0,0,0,.5);color:#cfe8f5;font-size:11px;line-height:1.65;z-index:5}
+  #cosCard.on{display:block}
+  #cosCard .ccImg{display:block;width:100%;height:190px;object-fit:contain;
+    border-radius:11px 11px 0 0;background:#040a10}
+  #cosCard .ccBody{padding:12px 14px 14px}
+  #cosCard .ccClose{position:absolute;right:8px;top:8px;width:24px;height:24px;padding:0;
+    border:1px solid rgba(200,230,240,.32);border-radius:50%;background:rgba(4,12,18,.8);
+    color:#dff2ff;font-size:15px;line-height:22px;text-align:center;cursor:pointer}
+  #cosCard .ccClose:hover{background:rgba(94,234,212,.25)}
+  #cosCard h4{margin:0 0 2px;font-size:13px;font-weight:600;color:#eaf8ff;letter-spacing:.03em}
+  #cosCard .ccEn{font-size:10px;color:#7fa8bb;margin-bottom:9px}
+  #cosCard .ccDesc{margin:0 0 10px;color:#b9d5e2;font-size:10.5px;line-height:1.72}
+  #cosCard table{width:100%;border-collapse:collapse;font-size:10px}
+  #cosCard td{padding:3px 0;border-top:1px solid rgba(255,255,255,.06);vertical-align:top}
+  #cosCard td.k{color:#6f96a8;width:68px;white-space:nowrap}
+  #cosCard .ccSrc{margin-top:10px;font-size:9px;color:#5f8597;line-height:1.65}
+  #cosCard .ccBtn{margin-top:11px;width:100%;padding:7px 0;border-radius:16px;
+    border:1px solid rgba(94,234,212,.4);background:rgba(94,234,212,.12);
+    color:#bff5ea;font:inherit;font-size:10.5px;letter-spacing:.08em;cursor:pointer}
+  #cosCard .ccBtn:hover{background:rgba(94,234,212,.22)}
+  body.photo #cosCard{display:none !important}
+  @media(max-width:640px){
+    #cosCard{right:10px;left:10px;top:auto;bottom:84px;width:auto;max-height:44vh}
+    #cosCard .ccImg{height:108px}
+  }
+
+  /* 对话 142：左侧小侧栏「天体浏览器」改成大窗口「天体图鉴」。
+     侧栏 DOM 仍由 app.js 构建（跳转逻辑复用），只是不再显示。 */
+  #nav,#navToggle{display:none !important}
+  #atlasBtn{position:fixed;left:22px;top:64px;z-index:36;pointer-events:auto;
+    display:inline-flex;align-items:center;gap:7px;padding:8px 13px;border-radius:9px;
+    border:1px solid rgba(94,234,212,.36);background:rgba(8,20,26,.76);color:#a9f0e2;
+    font:11px/1.4 -apple-system,"Segoe UI",system-ui,"PingFang SC",sans-serif;
+    letter-spacing:.05em;cursor:pointer;backdrop-filter:blur(10px);transition:.16s}
+  #atlasBtn:hover{background:rgba(94,234,212,.16);border-color:rgba(94,234,212,.6);color:#dffbf4}
+  #atlasBtn i{font-style:normal;font-size:13px}
+
+  #atlasModal{position:fixed;inset:0;z-index:5000;display:none;flex-direction:column;
+    background:rgba(3,7,11,.975);backdrop-filter:blur(12px);
+    font:13px/1.6 -apple-system,"Segoe UI",system-ui,"PingFang SC","Microsoft YaHei",sans-serif;color:#dcecf2}
+  #atlasModal.on{display:flex}
+  .am-head{display:flex;align-items:center;gap:14px;padding:15px 22px;
+    border-bottom:1px solid rgba(158,205,215,.14);flex-wrap:wrap}
+  .am-title b{font-size:16px;font-weight:600;letter-spacing:.05em;color:#effaff}
+  .am-title span{display:block;font-size:10.5px;color:#5d7784;letter-spacing:.03em}
+  .am-grow{flex:1}
+  #amSearch{padding:8px 12px;border-radius:8px;border:1px solid rgba(158,205,215,.18);
+    background:rgba(255,255,255,.045);color:#dcecf2;font:inherit;font-size:12px;width:240px;outline:none}
+  #amSearch:focus{border-color:rgba(94,234,212,.55)}
+  .am-head .btn,#amClose{padding:7px 13px;border-radius:8px;border:1px solid rgba(158,205,215,.18);
+    background:rgba(255,255,255,.04);color:#dcecf2;font:inherit;font-size:12px;cursor:pointer}
+  .am-head .btn:hover,#amClose:hover{border-color:rgba(94,234,212,.5);color:#9bf3e0}
+  .am-head .btn.logged{color:#9bf3e0;border-color:rgba(94,234,212,.35)}
+  #amClose{font-size:19px;line-height:1;padding:5px 11px}
+  .am-chips{display:flex;gap:7px;flex-wrap:wrap;padding:13px 22px 4px}
+  .am-chip{padding:5px 12px;border-radius:20px;border:1px solid rgba(158,205,215,.14);
+    background:rgba(255,255,255,.03);color:#9cb9c5;font-size:11.5px;cursor:pointer}
+  .am-chip.on{background:rgba(94,234,212,.16);border-color:rgba(94,234,212,.5);color:#9bf3e0}
+  .am-tip{padding:4px 22px 10px;font-size:10.5px;color:#4c6875}
+  /* 对话 143：固定每行 4 个，卡片不再随窗口无限变密。
+     grid-auto-rows:max-content 是必须的：容器是 flex:1（高度被压到 ~370px）且
+     卡片 overflow:hidden 时，auto 行会被算成 min-content ≈ 8px，整张卡只剩一条线，
+     图片和文字全被裁掉 —— 实测 cardH=7.84 而内部 phH=290.5。 */
+  .am-grid{flex:1;overflow-y:auto;display:grid;gap:16px;padding:8px 22px 22px;
+    grid-template-columns:repeat(4,minmax(0,1fr));grid-auto-rows:max-content;align-content:start}
+  .am-grid::-webkit-scrollbar{width:8px}.am-grid::-webkit-scrollbar-thumb{background:rgba(94,234,212,.2);border-radius:4px}
+  .am-card{border:1px solid rgba(158,205,215,.14);border-radius:11px;overflow:hidden;cursor:pointer;
+    background:rgba(12,20,28,.7);transition:transform .16s,border-color .16s,box-shadow .16s}
+  .am-card:hover{transform:translateY(-2px);border-color:rgba(94,234,212,.5);box-shadow:0 12px 32px rgba(0,0,0,.55)}
+  /* contain + 640² 统一缩略图：横幅老图不再被裁成「只有一半」。
+     min-height 是保险：grid 容器高度受限时部分浏览器会把纯 aspect-ratio 的行压成 0 高，
+     图片就整片变黑。 */
+  .am-card .ph{aspect-ratio:1/1;min-height:176px;background:#060a0f center/contain no-repeat;position:relative}
+  .am-card .ph .ty{position:absolute;left:7px;top:7px;padding:2px 7px;border-radius:5px;font-size:9.5px;
+    background:rgba(4,10,16,.82);border:1px solid rgba(158,205,215,.16);color:#9fc0cd}
+  /* 对话 161：无专属照片的条目用同类型实拍图，必须显式标注，避免误导 */
+  .am-card .ph .demo{position:absolute;right:7px;top:7px;padding:2px 7px;border-radius:5px;font-size:9.5px;
+    background:rgba(38,26,8,.86);border:1px solid rgba(226,178,88,.42);color:#e8c88c}
+  .am-card .ph .hd{position:absolute;right:7px;bottom:7px;padding:3px 8px;border-radius:5px;
+    font-size:10px;font-family:inherit;background:rgba(4,10,16,.86);
+    border:1px solid rgba(94,234,212,.42);color:#9bf3e0;cursor:pointer}
+  .am-card .ph .hd:hover{background:rgba(94,234,212,.2);color:#dcfff6}
+  .am-card .bd{padding:9px 11px 11px}
+  .am-card h3{margin:0 0 2px;font-size:12.5px;font-weight:600;color:#eaf6fa}
+  .am-card .en{font-size:10px;color:#54707c;height:14px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  .am-card .mt{display:flex;justify-content:space-between;gap:6px;margin-top:7px;font-size:10.5px;color:#8fb4cf}
+  .am-card .wiki{display:block;margin-top:8px;font-size:10.5px;color:#6fae9e;text-decoration:none}
+  .am-card .wiki:hover{color:#9bf3e0;text-decoration:underline}
+  .am-foot{padding:9px 22px;border-top:1px solid rgba(158,205,215,.12);display:flex;
+    align-items:center;justify-content:center;gap:12px;font-size:11.5px;color:#5d7784}
+  @media(max-width:720px){.am-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .am-head{padding:11px 12px}#amSearch{width:150px}.am-chips{padding:10px 12px 4px}.am-grid{padding:8px 12px 18px}}
+
+  /* 对话 143：超高清影像查看器（2048px ESA/Hubble 原图，可缩放拖拽） */
+  #hdViewer{position:fixed;inset:0;z-index:6000;display:none;flex-direction:column;
+    background:rgba(2,4,7,.985);color:#dcecf2;
+    font:13px/1.6 -apple-system,"Segoe UI",system-ui,"PingFang SC","Microsoft YaHei",sans-serif}
+  #hdViewer.on{display:flex}
+  .hv-head{display:flex;align-items:center;gap:14px;padding:11px 20px;flex-wrap:wrap;
+    border-bottom:1px solid rgba(158,205,215,.14);background:rgba(8,14,20,.9)}
+  .hv-head b{font-size:14px;font-weight:600}
+  .hv-head .hvsrc{font-size:10.5px;color:#5d7784}
+  .hv-grow{flex:1}
+  .hv-head button,.hv-head a{padding:6px 12px;border-radius:7px;border:1px solid rgba(158,205,215,.2);
+    background:rgba(255,255,255,.04);color:#dcecf2;font:inherit;font-size:11.5px;
+    text-decoration:none;cursor:pointer}
+  .hv-head button:hover,.hv-head a:hover{border-color:rgba(94,234,212,.5);color:#9bf3e0}
+  .hv-stage{flex:1;overflow:hidden;position:relative;display:flex;align-items:center;justify-content:center;
+    cursor:grab;touch-action:none}
+  .hv-stage.drag{cursor:grabbing}
+  .hv-stage img{max-width:none;max-height:none;display:block;user-select:none;-webkit-user-drag:none;
+    transform-origin:center center;box-shadow:0 20px 80px rgba(0,0,0,.8)}
+  .hv-foot{padding:9px 20px;border-top:1px solid rgba(158,205,215,.12);text-align:center;
+    font-size:11px;color:#5d7784}
+  .hv-foot b{color:#9bf3e0;font-weight:500}
+  body.deep-model #ui, body.deep-model #labels, body.deep-model #cosmoLabels, body.deep-model #cosmoHud, body.deep-model #atlasBtn, body.deep-model #perfpanel { display:none !important; }
+  #deepModelPanel{display:none;position:fixed;z-index:65;left:18px;top:18px;width:300px;max-width:calc(100vw - 36px);max-height:calc(100dvh - 36px);overflow:auto;padding:16px;border:1px solid #33505c;border-radius:14px;background:rgba(5,13,23,.92);color:#d8e9ee;font-size:12px;line-height:1.65;pointer-events:auto}
+  body.deep-model #deepModelPanel{display:block}
+  body.deep-model #toast{z-index:66;max-width:calc(100vw - 24px);text-align:center;overflow-wrap:anywhere}
+  body.deep-model #stage canvas:focus-visible{outline-offset:-4px}
+  @media (max-width:600px), (max-height:600px){
+    body.deep-model #deepModelPanel{max-height:calc(100dvh - 130px)}
+    body.deep-model #toast{bottom:8px;max-height:90px;overflow:hidden}
+  }
+  #deepModelPanel h2{font-size:16px;margin-bottom:8px}#deepModelPanel p{margin:9px 0;color:#acc1cd}#deepModelPanel select{width:100%;padding:8px;background:#142432;color:#ecf5fa;border:1px solid #355261;border-radius:6px}#deepModelPanel button{border:1px solid #355261;margin:3px;padding:6px 9px;border-radius:6px;background:#142432;color:#ecf5fa;cursor:pointer}#deepModelPanel img{width:100%;margin-top:8px}#deepModelStats{font-variant-numeric:tabular-nums;color:#86d9cd}#deepModelPanel summary{cursor:pointer}
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<section id="deepModelPanel" aria-label="三维近景技术样板">
+  <h2>深空 · 三维近景样板</h2>
+  <select id="deepModelTarget" aria-label="三维样板目标"><option value="47tuc">47 Tuc · 统计星族</option><option value="m42">M42 · 体积云气</option><option value="m51">M51 · 恒星盘与尘埃</option></select>
+  <p id="deepModelTruth">三维统计/艺术模型，非实测三维重建。尺寸与光学参数未标定。</p>
+  <div><button data-deep-view="front">正面</button><button data-deep-view="side">侧面</button><button data-deep-view="back">背面</button><button data-deep-view="near">接近</button></div>
+  <button id="deepModelDust">吸收：开启</button><button id="deepModelClose">返回主场景</button>
+  <div aria-label="近景截图"><button id="deepShot1x" type="button">截图 1× PNG</button><button id="deepShot2x" type="button">截图 2× PNG</button></div>
+  <p>拖动环绕 · 滚轮接近 · Shift+拖动平移<br>方向键环绕 · ＋/−缩放 · Esc返回</p>
+  <p>进入近景会终止当前飞行、旅程和转场；返回后不会自动续播。Tab 可切换画布和面板控件。</p>
+  <div id="deepModelStats"></div>
+  <details id="deepPerfDetails"><summary>性能诊断</summary><div id="deepPerfStatus">数据不足</div><p>帧间隔为近期平滑值，拖动时持续更新；包含浏览器调度时间，并非 GPU 耗时。</p></details>
+  <details><summary>观测影像对照（二维）</summary><img id="deepModelReference" alt="本目标真实二维影像，仅供对照，不表示三维模型已拟合"><p id="deepModelCredit">ESA/Hubble &amp; NASA；模型未做逐像素拟合，不会凭空增加实测细节。</p></details>
+</section>
+
+<div id="ui">
+  <div id="crumb"><button data-scale="earth" class="on">地球</button><span>/</span><button data-scale="system">太阳系</button><span>/</span><button data-scale="galaxy">银河系</button><span>/</span><button data-scale="local">本星系群</button><span>/</span><button data-scale="universe">宇宙</button></div>
+  <div id="nav"></div>
+  <button id="navToggle" aria-expanded="false" aria-label="天体浏览器"><i></i><span>天体</span></button>
+  <div class="brand"><span class="dot"></span><h1>SPACE·1:1</h1><span class="tag">METRIC</span></div>
+
+  <!-- 对话 81：原来三行快捷键常驻，信息量大但没人读；收成一行 + 「?」入口 -->
+  <div class="hint"><b>拖动</b> 旋转 · <b>滚轮</b> 缩放 · <b>?</b> 操作说明</div>
+
+  <div class="scalebox">
+    <div class="lbl">HEIGHT ABOVE SURFACE</div>
+    <div class="big"><b id="altVal">—</b><i id="altUnit">km</i></div>
+    <div class="sub" id="subLine">地球 · 半径 6,371 km</div>
+    <div class="sub" id="dateLine">2026-01-01 00:00 UTC · ×60</div>
+    <div class="logbar">
+      <div class="track"></div>
+      <div class="tick" style="left:0%"></div>
+      <div class="tick" style="left:15%"></div>
+      <div class="tick" style="left:30%"></div>
+      <div class="tick" style="left:45%"></div>
+      <div class="tick" style="left:60%"></div>
+      <div class="tick" style="left:75%"></div>
+      <div class="tick" style="left:90%"></div>
+      <div class="mark" id="scaleMark" style="left:50%"></div>
+      <div class="caps"><span>1 m</span><span>10 km</span><span>1000 km</span><span>1e13 m</span></div>
+    </div>
+  </div>
+
+  <div class="dockcol">
+    <div class="bar">
+      <button class="chip" id="dockToggle" aria-label="收起工具条" aria-expanded="true"><span>»</span></button>
+      <button class="chip" id="btnAtlas"><span>星图</span></button>
+      <button class="chip" id="deepModelBtn" aria-label="进入星系星云星团三维近景样板"><span>三维近景</span></button>
+      <button class="chip" id="deepDetailBtn" aria-label="打开星系星云星团的多尺度二维影像"><span>深空细节</span></button>
+      <button class="chip" data-pop="time"><span>时间</span></button>
+      <button class="chip" data-pop="set"><span>设置</span></button>
+      <button class="chip" data-pop="share"><span>分享</span></button>
+      <button class="chip" id="helpBtn" aria-label="操作说明"><span>?</span></button>
+    </div>
+
+    <!-- 对话 143：视角面板、星云按钮、地表面板全部收进设置。
+         星云渲染保留（设置 → 背景 → 深空天体），只是不再单独占一个工具栏按钮。 -->
+    <div class="pop" data-panel="time">
+      <div class="prow"><span class="plbl">流速</span>
+        <div class="pbtns">
+          <button class="btn" data-ts="0" aria-label="暂停时间">⏸</button>
+          <button class="btn" data-ts="1">实时</button>
+          <button class="btn" data-ts="60">×60</button>
+          <button class="btn" data-ts="3600">×1时</button>
+          <button class="btn" data-ts="43200">×12时</button>
+        </div>
+      </div>
+      <div class="prow"><span class="plbl">日期</span><span class="pval" id="dateLine2">—</span></div>
+    </div>
+
+    <div class="pop" data-panel="set">
+      <div class="prow"><span class="plbl">画质</span>
+        <div class="pbtns" id="qBtns">
+          <button class="btn" data-q="low">流畅</button>
+          <button class="btn" data-q="mid">标准</button>
+          <button class="btn" data-q="high">精细</button>
+          <button class="btn" data-q="ultra">极致</button>
+        </div>
+      </div>
+      <div class="prow"><span class="plbl">缩放</span>
+        <div class="pbtns" id="momBtns">
+          <button class="btn" data-mom="light" title="轻快惯性：真实时间驱动、反向即停、单次手势滑行封顶">轻快</button>
+          <button class="btn" data-mom="off" title="无惯性：连续滚动逐步加速，松手即停，定位最准">直接</button>
+          <button class="btn" data-mom="heavy" title="旧手感：长距离惯性滑行">厚重</button>
+        </div>
+      </div>
+      <div class="prow"><span class="plbl">地表</span>
+        <div class="pbtns">
+          <button class="btn" data-veg="1">植被开</button>
+          <button class="btn" data-veg="0">植被关</button>
+        </div>
+      </div>
+      <div class="prow"><span class="plbl">行星</span>
+        <div class="pbtns">
+          <button class="btn" data-tog="orbits" title="显示 / 隐藏八大行星的公转轨道线">轨道线</button>
+        </div>
+      </div>
+      <div class="prow"><span class="plbl">背景</span>
+        <div class="pbtns">
+          <button class="btn" data-tog="deep">深空天体</button>
+          <button class="btn" data-tog="moon">月光</button>
+          <button class="btn" data-tog="bh" title="在宇宙层显示已知黑洞的吸积环标记">黑洞</button>
+          <button class="btn" data-tog="body" title="星系与球状星团用 3D 恒星点云绘制；关掉则回到照片贴图">3D 星体</button>
+        </div>
+      </div>
+      <div class="prow"><span class="plbl">镜头</span>
+        <div class="pbtns">
+          <button class="btn" data-tog="star" title="镜头衍射星芒：太阳、夜间亮星、城市灯与月面的尖峰（关掉整组消失）">星芒</button>
+          <button class="btn" id="bladesBtn" data-act="blades" title="光阑叶片数：决定尖峰条数，点一下换一档（4 / 5 / 6 / 8 / 12 片）">光阑 6 片</button>
+          <button class="btn" id="sunAimBtn" data-act="aim" title="把视线转到太阳：星芒只在太阳进画面时才出现，默认俯视地球看不到">看太阳</button>
+          <button class="btn" id="journeyBtn" data-act="journey" title="自动播放：地球 → 太阳系 → 银河系 → 本星系群 → 室女座 → 拉尼亚凯亚 → 宇宙纤维网 → 可观测宇宙 → 多元宇宙。拖动 / 滚轮可随时接管">宇宙之旅</button>
+        </div>
+      </div>
+      <div class="prow"><span class="plbl">自适应</span>
+        <div class="pbtns">
+          <button class="btn" data-tog="auto">动态分辨率</button>
+        </div>
+      </div>
+      <div class="prow"><span class="plbl">诊断</span>
+        <div class="pbtns">
+          <button class="btn" data-tog="perf">性能面板</button>
+        </div>
+      </div>
+      <div class="prow"><span class="plbl">拖拽</span>
+        <div class="pbtns">
+          <button class="btn" data-tog="invertY">反转纵向</button>
+        </div>
+      </div>
+      <div class="prow"><span class="plbl">灵敏度</span>
+        <input type="range" id="sensRange" min="0.4" max="2.2" step="0.1" aria-label="灵敏度" />
+      </div>
+      <div class="pstat" id="perfStat">帧 — · 渲染 —</div>
+      <div class="pkeys">
+        <b>拖动</b> 旋转 · <b>滚轮</b> 缩放 · <b>双击</b> 拉近<br>
+        <b>F</b> 全屏 · <b>R</b> 复位 · <b>H</b> 隐藏界面 · <b>V</b> 植被 · <b>T</b> 暂停时间
+      </div>
+      <div class="prow"><button class="btn wide" data-act="reset">恢复默认设置</button></div>
+      <div class="pver" id="verLine">版本 — · —</div>
+    </div>
+
+    <!-- 对话 83：分享与摄影 -->
+    <div class="pop" data-panel="share">
+      <div class="prow"><span class="plbl">视角链接</span>
+        <div class="pbtns"><button class="btn wide" id="shareCopy">复制当前视角链接</button></div>
+      </div>
+      <div class="prow"><span class="plbl">截图</span>
+        <div class="pbtns">
+          <button class="btn" id="shot1x">1× PNG</button>
+          <button class="btn" id="shot2x">2× PNG</button>
+        </div>
+      </div>
+      <div class="prow"><span class="plbl">摄影</span>
+        <div class="pbtns"><button class="btn wide" id="photoBtn">进入摄影模式</button></div>
+      </div>
+      <div class="prow"><span class="plbl">链接内容</span><span class="pval" id="shareInfo">—</span></div>
+      <div class="pver" id="shareHint">链接含经纬度 / 高度 / 俯仰 / 朝向 / 时刻，打开即回到同一帧画面。</div>
+    </div>
+  </div>
+</div>
+
+<div id="perfpanel">
+  <div class="pfhead"><span>主场景 · 最近采样</span><i id="pfHint">P 关闭</i></div>
+  <canvas id="pfGraph" width="240" height="40"></canvas>
+  <div class="pgrid">
+    <span>帧</span><b id="pfMs">—</b><span>FPS</span><b id="pfFps">—</b>
+    <span>draw</span><b id="pfDraw">—</b><span>三角</span><b id="pfTri">—</b>
+    <span>地块</span><b id="pfPatch">—</b><span>队列</span><b id="pfQueue">—</b>
+    <span>植被</span><b id="pfVeg">—</b><span>渲染</span><b id="pfScale">—</b>
+    <span>云步(低/卷)</span><b id="pfCloud">—</b><span>几何</span><b id="pfCache">—</b>
+  </div>
+</div>
+
+<div id="labels"></div>
+<div id="cosmoLabels"></div>
+
+<!-- 对话 94：宇宙尺度读数（进入宇宙层时替换左下角的地表高度计） -->
+<div id="cosmoHud">
+  <div class="cs-lbl">DISTANCE FROM GALACTIC CENTER</div>
+  <div class="cs-big"><b id="csVal">—</b><i id="csUnit">光年</i></div>
+  <div class="cs-bar">
+    <div class="tr"></div>
+    <div class="mk" id="csMark" style="left:10%"></div>
+    <div class="caps"><span>1 AU</span><span>1 光年</span><span>1 千光年</span><span>1 百万光年</span><span>1 十亿光年</span></div>
+  </div>
+</div>
+
+<button id="atlasBtn" aria-label="打开天体图鉴"><i>▦</i><span>天体图鉴 · 268</span></button>
+
+<div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+<!-- 对话 142：大窗口天体图鉴（替代左侧小侧栏天体浏览器） -->
+<div id="atlasModal" role="dialog" aria-modal="true" aria-label="天体图鉴">
+  <div class="am-head">
+    <div class="am-title"><b>天体图鉴</b><span>268 条实测档案 · ESA/Hubble &amp; NASA 真实影像（部分条目为同类型示意）</span></div>
+    <div class="am-grow"></div>
+    <input id="amSearch" placeholder="搜索名称 / 编号，如 M31、NGC 104">
+    <a class="btn" id="amWiki" href="catalog.html" target="_blank" rel="noopener">天体维基 ↗</a>
+    <button class="btn" data-auth-btn data-auth-label="登录 / 注册">登录 / 注册</button>
+    <button id="amClose" aria-label="关闭" title="关闭">×</button>
+  </div>
+  <div class="am-chips" id="amChips"></div>
+  <div class="am-tip">点击卡片在三维宇宙中定位；图片均为真实望远镜拍摄，类型示意条目在维基页有明确标注。</div>
+  <div class="am-grid" id="amGrid"></div>
+  <div class="am-foot" id="amFoot"></div>
+</div>
+
+<!-- 对话 143：超高清影像查看器 -->
+<div id="hdViewer" role="dialog" aria-modal="true" aria-label="超高清天体影像">
+  <div class="hv-head">
+    <b id="hvTitle">超高清影像</b>
+    <span class="hvsrc" id="hvSrc">ESA/Hubble &amp; NASA · CC BY 4.0</span>
+    <div class="hv-grow"></div>
+    <button id="hvFit">适应窗口</button>
+    <button id="hv1to1">1:1 原始像素</button>
+    <a id="hvOpen" href="#" target="_blank" rel="noopener">打开原图 ↗</a>
+    <button id="hvClose" aria-label="关闭" title="关闭">×</button>
+  </div>
+  <div class="hv-stage" id="hvStage"><img id="hvImg" alt="超高清天体影像"></div>
+  <div class="hv-foot">滚轮缩放 · 拖拽平移 · 双击还原 · Esc 关闭 · <b id="hvInfo">—</b></div>
+</div>
+
+<!-- 对话 79：跨天体切换的转场遮罩（同天体内部用缓动，不遮） -->
+<div id="fade"></div>
+
+<div id="fatal">
+  <div>
+    <h2 id="fatalTitle">无法启动 3D 渲染</h2>
+    <p id="fatalMsg"></p>
+    <div class="fbtns"><button id="fatalReload">刷新重试</button></div>
+    <p class="fhint" id="fatalHint">需要支持 WebGL2 的浏览器（Chrome / Edge / Safari 15+），并确认没有关闭硬件加速。</p>
+  </div>
+</div>
+
+<div id="updbar"><span>有新版本可用</span><button id="updBarBtn">刷新</button></div>
+
+<!-- 对话 83：摄影模式下的退出提示（UI 全部隐藏时唯一的操作入口） -->
+<div id="photoExit"><span>摄影模式 · 拖动 / 滚轮照常可用</span><button id="photoExitBtn">退出 Esc</button></div>
+
+<!-- 对话 81：首次引导（3 步，只出现一次） -->
+<div id="tour" role="dialog" aria-modal="true" aria-labelledby="tourTitle" aria-hidden="true">
+  <div class="tcard">
+    <div class="tstep" id="tourStep">01 / 03</div>
+    <h3 id="tourTitle">拖动旋转</h3>
+    <p id="tourBody"></p>
+    <div class="tdots" id="tourDots"><i class="on"></i><i></i><i></i></div>
+    <div class="tbtns">
+      <button class="skip" id="tourSkip">跳过</button>
+      <button class="next" id="tourNext">下一步</button>
+    </div>
+  </div>
+</div>
+
+<!-- 对话 81：操作说明（? 键 / 底部「?」按钮） -->
+<div id="help" role="dialog" aria-modal="true" aria-labelledby="helpTitle" aria-hidden="true">
+  <div class="hcard">
+    <div class="hhd"><h3 id="helpTitle">操作说明</h3><button class="hclose" id="helpClose" aria-label="关闭">×</button></div>
+    <div class="hsub">SPACE·1:1 · 全尺度天体浏览器</div>
+    <div class="hgrp">鼠标 / 触控板</div>
+    <table>
+      <tr><td class="k">拖动</td><td>旋转视角（上下拖动改变俯角）</td></tr>
+      <tr><td class="k">滚轮</td><td>连续缩放：行星轨道 → 14 m 贴地，共 14 个数量级；设置里可切「缩放」手感（轻快 / 直接 / 厚重）</td></tr>
+      <tr><td class="k">双击</td><td>快速拉近一档</td></tr>
+      <tr><td class="k">点击天体</td><td>画面上的名字标签可直接跳转</td></tr>
+    </table>
+    <div class="hgrp">触屏</div>
+    <table>
+      <tr><td class="k">单指拖动</td><td>旋转视角</td></tr>
+      <tr><td class="k">双指捏合</td><td>缩放（张开拉近 / 收拢拉远）</td></tr>
+      <tr><td class="k">双击</td><td>拉近一档</td></tr>
+      <tr><td class="k">右上角「天体」</td><td>展开天体列表（85 个目标）</td></tr>
+    </table>
+    <div class="hgrp">分享与导出</div>
+    <table>
+      <tr><td class="k">分享面板</td><td>底部「分享」：复制当前视角链接（含经纬度 / 高度 / 俯仰 / 朝向 / 时刻）</td></tr>
+      <tr><td class="k">截图</td><td>1× / 2× PNG，直接读渲染器，不含任何界面元素</td></tr>
+      <tr><td class="k">摄影模式</td><td>隐藏全部界面与天体标签，Esc 退出</td></tr>
+    </table>
+    <div class="hgrp">键盘</div>
+    <div class="kgrid">
+      <div><span class="kk"><kbd>拖动</kbd></span><span>旋转视角 / 移动落点</span></div>
+      <div><span class="kk"><kbd>双击</kbd></span><span>向目标拉近一档</span></div>
+      <div><span class="kk"><kbd>Q</kbd><kbd>E</kbd></span><span>压低 / 抬高视角</span></div>
+      <div><span class="kk"><kbd>R</kbd></span><span>重新选点</span></div>
+      <div><span class="kk"><kbd>F</kbd></span><span>全屏</span></div>
+      <div><span class="kk"><kbd>V</kbd></span><span>植被开关</span></div>
+      <div><span class="kk"><kbd>T</kbd></span><span>暂停 / 继续时间</span></div>
+      <div><span class="kk"><kbd>P</kbd></span><span>性能面板</span></div>
+      <div><span class="kk"><kbd>H</kbd></span><span>隐藏界面</span></div>
+      <div><span class="kk"><kbd>?</kbd><kbd>F1</kbd></span><span>打开本说明</span></div>
+      <div><span class="kk"><kbd>Esc</kbd></span><span>关闭说明 / 引导</span></div>
+    </div>
+    <div class="hfoot" id="helpFoot"></div>
+  </div>
+</div>
+
+<div id="loader">
+  <div class="lg">SPACE·1:1</div>
+  <div class="lbar"><i></i></div>
+  <div class="lt">DECODING EARTH DATA</div>
+</div>
+
+<!-- 本地 ESM 版 three（对话 64）：http 模式也不再依赖 unpkg CDN。
+     以前指向 https://unpkg.com/... ，国内网络慢/不通时页面会永远卡在
+     GENERATING TERRAIN。单文件版由 build.mjs 内联 UMD three.min.js，
+     这段 importmap 会被构建脚本整段删掉，两者互不影响。 -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "./js/three.module.min.js"
+  }
+}
+</script>
+
+<script>
+/* =============================================================================
+   对话 143：超高清影像查看器
+   -----------------------------------------------------------------------------
+   卡片里的 640² 缩略图只能看个大概；这里按需加载 ESA/Hubble 2048px 原图，
+   滚轮缩放 / 拖拽平移 / 1:1 原始像素，能看清旋臂里的尘埃带和星团里的恒星。
+   三级回退：data/hd/<key>.jpg → data/photo/<key>.jpg → 单文件内联 base64。
+   ============================================================================= */
+(function(){
+  'use strict';
+  var INL = window.__ORBIT_INLINE__ || {};
+  var $ = function(s){ return document.querySelector(s); };
+  var box, img, stage, scale = 1, tx = 0, ty = 0, nw = 0, nh = 0, dragging = false, sx = 0, sy = 0;
+
+  function apply(){
+    if (!img) return;
+    img.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+    $('#hvInfo').textContent = (nw ? nw + ' × ' + nh + ' px · ' : '') + Math.round(scale * 100) + '%';
+  }
+  function fit(){
+    if (!nw || !stage) return;
+    scale = Math.min(stage.clientWidth / nw, stage.clientHeight / nh, 1) * 0.94;
+    tx = 0; ty = 0; apply();
+  }
+  function close(){ if (box) box.classList.remove('on'); }
+  function open(key, title){
+    if (!key) return;
+    box = $('#hdViewer'); img = $('#hvImg'); stage = $('#hvStage');
+    if (!box || !img) return;
+    $('#hvTitle').textContent = title || '超高清天体影像';
+    var AB = location.protocol==='file:' ? './public/data/' : './data/';
+    $('#hvOpen').href = AB + 'hd/' + encodeURIComponent(key) + '.jpg';
+    box.classList.add('on');
+    scale = 1; tx = 0; ty = 0; nw = 0; nh = 0;
+    /* 对话 142：内联数据由 build.mjs 注入在 app.js 标签处（本 IIFE 之后），
+       模块加载时 window.__ORBIT_INLINE__ 还不存在，缓存的 INL 会是 {} ——
+       离线单文件下超高清影像永远走不到内联分支。这里在打开时再读一次。 */
+    var I0 = window.__ORBIT_INLINE__ || {};
+    var inline = I0.photo && I0.photo[key] ? 'data:image/jpeg;base64,' + I0.photo[key] : '';
+    /* 对话 161：内联图优先。原来先试 data/hd/ 再试 data/photo/，
+       离线单文件（file://）下这两个相对路径都不存在，会连报两次资源
+       失败才回退到内联；在线版 I0.photo 为空，仍按 hd → photo 顺序。 */
+    var tries = [inline,
+                 'data/hd/' + encodeURIComponent(key) + '.jpg',
+                 'data/photo/' + encodeURIComponent(key) + '.jpg'].filter(Boolean);
+    var i = 0;
+    img.onload = function(){
+      nw = img.naturalWidth; nh = img.naturalHeight;
+      $('#hvOpen').href = img.src;
+      fit();
+    };
+    img.onerror = function(){
+      i++;
+      if (i < tries.length) img.src = tries[i];
+      else $('#hvInfo').textContent = '该影像暂无高清版本';
+    };
+    img.src = tries[0];
+    img.style.transform = 'none';
+  }
+  function bind(){
+    box = $('#hdViewer'); img = $('#hvImg'); stage = $('#hvStage');
+    if (!box || !stage) return;
+    $('#hvClose').onclick = close;
+    $('#hvFit').onclick = fit;
+    $('#hv1to1').onclick = function(){ scale = 1; tx = 0; ty = 0; apply(); };
+    stage.addEventListener('dblclick', fit);
+    stage.addEventListener('wheel', function(e){
+      if (!box.classList.contains('on')) return;
+      e.preventDefault();
+      var k = e.deltaY < 0 ? 1.16 : 1 / 1.16;
+      scale = Math.max(0.08, Math.min(9, scale * k));
+      apply();
+    }, {passive:false});
+    stage.addEventListener('pointerdown', function(e){
+      if (e.target.tagName === 'BUTTON') return;
+      dragging = true; sx = e.clientX - tx; sy = e.clientY - ty;
+      stage.classList.add('drag'); stage.setPointerCapture(e.pointerId);
+    });
+    stage.addEventListener('pointermove', function(e){
+      if (!dragging) return;
+      tx = e.clientX - sx; ty = e.clientY - sy; apply();
+    });
+    stage.addEventListener('pointerup', function(){ dragging = false; stage.classList.remove('drag'); });
+    stage.addEventListener('pointercancel', function(){ dragging = false; stage.classList.remove('drag'); });
+    document.addEventListener('keydown', function(e){
+      if (e.key === 'Escape' && box.classList.contains('on')) close();
+    });
+    addEventListener('resize', function(){ if (box.classList.contains('on')) fit(); });
+  }
+  window.OrbitHD = { open: open, close: close };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind);
+  else bind();
+})();
+</script>
+<script src="./js/auth.js"></script>
+<script>
+/* =============================================================================
+   对话 142：天体浏览器 → 大窗口天体图鉴
+   -----------------------------------------------------------------------------
+   原来左上角是一个 262px 宽的小侧栏，只能显示文字列表和一张 66px 的小图，
+   「档案库那样的大窗口 + 全部实拍图」做不到。现在改成全屏网格：
+     · 268 条档案每条都有一幅真实影像（构建时内联，file:// 双击也能看）
+     · 点击卡片复用 app.js 原有的 #nav 跳转逻辑定位到三维场景
+     · 侧栏 DOM 保留但不显示，避免改动 1.6 万行的渲染主逻辑
+   ============================================================================= */
+(function(){
+  'use strict';
+  var INL = window.__ORBIT_INLINE__ || {}, PH = INL.photo || {}, OBJ = INL.objects || [];
+  var KINDS = INL.photoKind || {}, HDK = INL.hdKeys || [];
+  /* 对话 161：维基页只有 public/ 下一份（它内部还依赖 js/ 与 data/）。
+     离线单文件在根目录双击 → 必须退到 ./public/；http 服务根就是 public/。 */
+  var WIKI = location.protocol==='file:' ? './public/catalog.html' : './catalog.html';
+  /* 对话 142：同上 —— __ORBIT_INLINE__ 注入位置在本 IIFE 之后，IIFE 执行时
+     OBJ 恒为 []。原来只能靠 fetch 后端接口兜底，离线单文件下就变成
+     ① 图鉴空白 ② file:// fetch 触发 CORS 报错。load() 时数据已注入，重取一次。 */
+  function refreshInline(){
+    var I = window.__ORBIT_INLINE__ || {};
+    if (I.photo) PH = I.photo;
+    if (I.photoKind) KINDS = I.photoKind;
+    if (I.hdKeys) HDK = I.hdKeys;
+    if (!OBJ.length && I.objects && I.objects.length) OBJ = I.objects;
+    return OBJ.length;
+  }
+  var TYPE_CN = {galaxy_spiral:'旋涡星系',galaxy_barred:'棒旋星系',galaxy_elliptical:'椭圆星系',
+    galaxy_lenticular:'透镜星系',galaxy_irregular:'不规则星系',galaxy_dwarf:'矮星系',
+    group:'星系群',cluster:'星系团',supercluster:'超星系团',filament:'纤维 / 长城',
+    void:'宇宙空洞',quasar:'类星体',blackhole:'黑洞',globular:'球状星团'};
+  var CATS = [['all','全部'],['galaxy','星系'],['globular','球状星团'],['group','星系群'],
+    ['cluster','星系团 / 超星系团'],['large','大尺度结构'],['exotic','类星体 / 黑洞']];
+  var cat='all', q='', page=1, per=60, list=[], pages=1;
+  var $ = function(s){ return document.querySelector(s); };
+  var esc = function(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
+
+  function groupOf(t){
+    t = t || '';
+    if (t.indexOf('galaxy')===0) return 'galaxy';
+    if (t==='globular') return 'globular';
+    if (t==='group') return 'group';
+    if (t==='cluster'||t==='supercluster') return 'cluster';
+    if (t==='filament'||t==='void') return 'large';
+    return 'exotic';
+  }
+  function fmtLy(v){
+    if(!v) return '—';
+    var a=Math.abs(v);
+    if(a<1e4) return Math.round(v).toLocaleString()+' 光年';
+    if(a<1e8) return (v/1e4).toFixed(a<1e5?2:0)+' 万光年';
+    if(a<1e12) return (v/1e8).toFixed(a<1e9?2:1)+' 亿光年';
+    return (v/1e12).toFixed(2)+' 万亿光年';
+  }
+  /* 对话 161：无专属照片的条目不能留空卡片。build.mjs 已在数据层补齐并打
+     photoFallback，这里再兜一层 —— 在线版 objects 由后端返回时同样可能没有
+     photoKey。按 code 确定性挑一张同类型实拍图，视觉上不再整片黑。 */
+  function hashStr(t){ var h=0; t=String(t||''); for(var i=0;i<t.length;i++) h=(h*31+t.charCodeAt(i))>>>0; return h; }
+  function photoUrl(o){
+    var k=o.photoKey||'';
+    if(!k){
+      var pool=Object.keys(KINDS).filter(function(x){return KINDS[x]==='gal'&&PH[x]});
+      if(!pool.length) return '';
+      k=pool[hashStr(o.code||o.name)%pool.length]; o._demo=true;
+    }
+    if (PH[k]) return 'data:image/jpeg;base64,'+PH[k];
+    return 'data/photo/'+encodeURIComponent(k)+'.jpg';
+  }
+  function card(o){
+    var u=photoUrl(o), demo=!!(o.photoFallback||o._demo);
+    /* 超高清按钮只对真正有 2048px 版本的条目显示；原先 268 条全渲染，
+       其中 38 张空白卡片也带按钮，点了必然「该影像暂无高清版本」。 */
+    var hd=(u && o.photoKey && HDK.indexOf(o.photoKey)>=0)
+      ? '<button class="hd" data-hd="'+esc(o.photoKey)+'" data-title="'+esc(o.name)+'">超高清 ↗</button>' : '';
+    return '<article class="am-card" data-code="'+esc(o.code)+'">'+
+      '<div class="ph" style="background-image:url(\''+u+'\')">'+
+        '<span class="ty">'+(TYPE_CN[o.type]||o.type)+'</span>'+
+        (demo?'<span class="demo">类型示意</span>':'')+ hd +'</div>'+
+      '<div class="bd"><h3>'+esc(o.name)+'</h3>'+
+        '<div class="en">'+esc(o.nameEn||o.code)+'</div>'+
+        '<div class="mt"><span>'+fmtLy(o.distanceLy)+'</span><span>'+
+          (o.magnitude!=null?o.magnitude.toFixed(1)+' 等':'')+'</span></div>'+
+        '<a class="wiki" href="'+WIKI+'?q='+encodeURIComponent(o.code)+'" target="_blank" rel="noopener">维基词条与文献 ↗</a>'+
+      '</div></article>';
+  }
+  function render(){
+    var s=q.trim().toLowerCase();
+    list = OBJ.filter(function(o){
+      var okCat = cat==='all' || groupOf(o.type)===cat;
+      var okQ = !s || (o.name+' '+(o.nameEn||'')+' '+(o.alias||'')+' '+o.code).toLowerCase().indexOf(s)>=0;
+      return okCat && okQ;
+    });
+    pages = Math.max(1, Math.ceil(list.length/per));
+    page = Math.min(page, pages);
+    $('#amChips').innerHTML = CATS.map(function(c){
+      var n = c[0]==='all' ? OBJ.length : OBJ.filter(function(o){return groupOf(o.type)===c[0];}).length;
+      return '<button class="am-chip'+(cat===c[0]?' on':'')+'" data-c="'+c[0]+'">'+c[1]+' <span style="opacity:.55">'+n+'</span></button>';
+    }).join('');
+    $('#amChips').querySelectorAll('.am-chip').forEach(function(b){
+      b.onclick=function(){ cat=b.dataset.c; page=1; render(); };
+    });
+    var slice = list.slice((page-1)*per, page*per);
+    $('#amGrid').innerHTML = slice.map(card).join('') ||
+      '<div style="color:#5d7784;padding:30px 0">没有匹配的条目</div>';
+    $('#amGrid').scrollTop = 0;
+    $('#amFoot').innerHTML =
+      '<button class="am-chip" id="amPrev"'+(page<=1?' disabled':'')+'>上一页</button>'+
+      '<span>共 '+list.length+' 条 · 第 '+page+' / '+pages+' 页</span>'+
+      '<button class="am-chip" id="amNext"'+(page>=pages?' disabled':'')+'>下一页</button>';
+    $('#amPrev').onclick=function(){ if(page>1){page--;render();} };
+    $('#amNext').onclick=function(){ if(page<pages){page++;render();} };
+    $('#amGrid').querySelectorAll('.hd').forEach(function(b){
+      b.onclick=function(e){
+        e.stopPropagation();
+        if (window.OrbitHD) window.OrbitHD.open(b.dataset.hd, b.dataset.title);
+      };
+    });
+    $('#amGrid').querySelectorAll('.am-card').forEach(function(c){
+      c.onclick=function(e){
+        if (e.target.closest('.wiki') || e.target.closest('.hd')) return;
+        var o = OBJ.filter(function(x){return x.code===c.dataset.code;})[0];
+        if (o) locate(o);
+      };
+    });
+  }
+  /* 复用 app.js 原有的浏览器跳转：往隐藏的 #nav 输入框写关键词，再触发对应条目 */
+  function locate(o){
+    close();
+    var inp = document.querySelector('#nav input');
+    var keys = [o.name, o.nameEn, (o.code.split(':')[1]||'').replace(/_/g,' '),
+                (o.name.match(/M\s?\d+|NGC\s?\d+|IC\s?\d+|Pal\s?\d+/)||[])[0]];
+    for (var i=0; i<keys.length; i++){
+      var k=(keys[i]||'').trim(); if(!k || !inp) continue;
+      inp.value=k; inp.dispatchEvent(new Event('input'));
+      var probe=k.toLowerCase().slice(0,5);
+      var btns=Array.prototype.slice.call(document.querySelectorAll('#nav .bi'));
+      var hit=btns.filter(function(b){return b.textContent.toLowerCase().indexOf(probe)>=0;})[0] || btns[0];
+      if (btns.length && hit && !/未选择|随机生成/.test(hit.textContent)){
+        hit.click();
+        if (window.__SE && window.__SE.toast) window.__SE.toast('已定位：'+o.name);
+        return;
+      }
+    }
+    if (window.__SE && window.__SE.toast)
+      window.__SE.toast('三维目录里没有「'+o.name+'」，可在天体维基查看词条');
+  }
+  var atlasLoadError = false;
+  function atlasUnavailable(){
+    $('#amChips').textContent = '';
+    $('#amGrid').textContent = '图鉴档案加载失败或数据不可用。请检查服务及网络，或使用已构建的主入口。';
+    $('#amFoot').textContent = '';
+  }
+  function open(){ $('#atlasModal').classList.add('on'); if(OBJ.length) render(); else if(atlasLoadError) atlasUnavailable(); setTimeout(function(){ $('#amSearch').focus(); },40); }
+  function close(){ $('#atlasModal').classList.remove('on'); }
+
+  function bind(){
+    $('#deepDetailBtn').onclick = function(){
+      if (!/^https?:$/.test(location.protocol)) {
+        var msg = '深空细节使用本地分级资源，需通过本机 HTTP 服务打开。运行 tools/serve-deep-detail.py 后访问 http://127.0.0.1:8169/deep-detail.html；当前离线主场景保持可用。';
+        if (window.__SE && window.__SE.toast) window.__SE.toast(msg);
+        window.alert(msg);
+        return;
+      }
+      window.open('./deep-detail.html?target=m51', '_blank', 'noopener');
+    };
+    $('#amWiki').href = WIKI;
+    $('#atlasBtn').onclick=open;
+    $('#amClose').onclick=close;
+    $('#amSearch').addEventListener('input',function(e){ q=e.target.value; page=1; if(OBJ.length) render(); else if(atlasLoadError) atlasUnavailable(); });
+    document.addEventListener('keydown',function(e){
+      if(e.key==='Escape' && $('#atlasModal').classList.contains('on')) close();
+    });
+    if (window.OrbitAuth) window.OrbitAuth.onToast = function(t){ if(window.__SE&&window.__SE.toast) window.__SE.toast(t); };
+  }
+  function load(){
+    bind();
+    refreshInline();
+    if (OBJ.length) return;
+    /* file:// 单文件没有后端，fetch 只会报 CORS；离线时图鉴数据已在内联包里 */
+    if (location.protocol === 'file:') { atlasLoadError = true; return; }
+    /* 开发模式：任何一页失败或响应无效时明确提示，而不将部分数据当完整档案。 */
+    function records(r){
+      if(!r.ok) throw new Error('档案接口 HTTP '+r.status);
+      return r.json().then(function(j){
+        if(!j || !j.data || !Array.isArray(j.data.records)) throw new Error('档案接口响应无效');
+        return j.data.records;
+      });
+    }
+    fetch('/api/objects?page=1&size=200').then(records).then(function(a){
+      return fetch('/api/objects?page=2&size=200').then(records)
+        .then(function(b){ if(!a.length && !b.length) throw new Error('档案为空'); OBJ=a.concat(b); });
+    }).catch(function(){ atlasLoadError = true; }).finally(function(){
+      if($('#atlasModal').classList.contains('on')) { if(OBJ.length) render(); else atlasUnavailable(); }
+    });
+  }
+  if (document.readyState==='loading') document.addEventListener('DOMContentLoaded',load); else load();
+})();
+</script>
+<script src="./js/deep-models.js"></script>
+<script type="module" src="./js/p2-candidate-preview-v4.js"></script>
+</body>
+</html>

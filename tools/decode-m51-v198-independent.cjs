@@ -1,0 +1,13 @@
+'use strict';
+const fs = require('fs'), vm = require('vm'), path = require('path');
+if (!process.argv[2]) throw Error('必须指定 v198 录像绝对路径');
+const input = path.resolve(process.argv[2]);
+if (!/m51-v198-independent-[0-9a-f-]+\.webm$/i.test(input)) throw Error('输入不是 v198 录像命名');
+const sourcePath = path.join(__dirname, '..', 'm51-independent-frame-verification.cjs');
+let source = fs.readFileSync(sourcePath, 'utf8');
+const original = "const path='D:/WB/orbit/m51-v196-independent-7c3b2b22-2bd1-438a-a4e3-bffc0e3f020d.webm';";
+if (!source.includes(original)) throw Error('解码脚本入口结构不匹配');
+source = source.replace(original, 'const path=' + JSON.stringify(input) + ';');
+source = source.replace('m51-frame-verification-', 'm51-v198-frame-verification-');
+source = source.replace('report.encodedTimestamps=frames.map(f=>f.timestamp);save();', "report.encodedTimestamps=frames.map(f=>f.timestamp);report.encodedIntervalsUs=frames.slice(1).map((f,i)=>f.timestamp-frames[i].timestamp);report.encodedFrameSamples=[0,Math.floor(frames.length/2),frames.length-1].map(i=>({index:i,timestampUs:frames[i].timestamp,type:frames[i].type}));save();");
+vm.runInThisContext(`(function(require,__dirname,__filename){${source}\n})`, {filename: sourcePath})(require, path.dirname(sourcePath), sourcePath);

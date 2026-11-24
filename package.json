@@ -1,0 +1,15 @@
+{
+  "name": "space-1to1",
+  "version": "34.0.0",
+  "type": "module",
+  "private": true,
+  "description": "SPACE·1:1 — 1:1 尺度行星引擎（前端渲染 + Node 后端静态/内容服务）",
+  "scripts": {
+    "dev": "node server/server.mjs --port 8132",
+    "build": "node build.mjs",
+    "deep:build": "python tools/make-deep-tiles.py",
+    "deep:serve": "python tools/serve-deep-detail.py",
+    "deep:test": "node tools/test-deep-detail.cjs",
+    "bake": "node build.mjs --preflight && python tools/make-earth-map.py && node tools/embed-earth-map.cjs && node build.mjs"
+  }
+}

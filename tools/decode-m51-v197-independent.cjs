@@ -1,0 +1,10 @@
+'use strict';
+const fs=require('fs'),vm=require('vm'),path=require('path');
+if(!process.argv[2]) throw Error('必须指定新录制的 WebM 绝对路径');
+const input=path.resolve(process.argv[2]);
+if(!/m51-v197-independent-[0-9a-f-]+\.webm$/i.test(input)) throw Error('输入不是 v197 本次录像命名');
+const sourcePath=path.join(__dirname,'..','m51-independent-frame-verification.cjs');
+let source=fs.readFileSync(sourcePath,'utf8');
+source=source.replace("const path='D:/WB/orbit/m51-v196-independent-7c3b2b22-2bd1-438a-a4e3-bffc0e3f020d.webm';",'const path='+JSON.stringify(input)+';');
+source=source.replace('m51-frame-verification-', 'm51-v197-frame-verification-');
+vm.runInThisContext(`(function(require,__dirname,__filename){${source}\n})`,{filename:sourcePath})(require,path.dirname(sourcePath),sourcePath);

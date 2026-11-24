@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>深空细节实验室 · 多尺度影像</title>
+<style>
+:root{color-scheme:dark;font:14px system-ui,sans-serif;background:#070b14;color:#e6edf7}*{box-sizing:border-box}body{margin:0;height:100dvh;display:flex;flex-direction:column}header{padding:16px 22px;border-bottom:1px solid #243145;display:flex;gap:16px;align-items:center;flex-wrap:wrap}h1{font-size:18px;margin:0}small{color:#8fa5c0}button,select,a{background:#152238;color:#e6edf7;border:1px solid #35465e;border-radius:6px;padding:8px 12px;font:inherit}button{cursor:pointer}button:focus-visible,select:focus-visible,a:focus-visible{outline:2px solid #69c6ff}a{text-decoration:none}main{flex:1;position:relative;min-height:200px;overflow:hidden}canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}canvas:active{cursor:grabbing}.badge{position:absolute;top:16px;left:20px;pointer-events:none;color:#a4bedc;max-width:calc(100% - 40px);background:#070b14c9;padding:10px;border-radius:5px}.note{padding:10px 22px;background:#101a2b;color:#a9bfd8;line-height:1.7}footer{padding:12px 22px;border-top:1px solid #243145;display:flex;gap:14px;flex-wrap:wrap;color:#9bb0ca;font-size:12px}#status{flex:1;min-width:240px}#error{color:#edc78e}#stats{font-variant-numeric:tabular-nums} @media(max-width:650px){header{padding:12px;gap:8px}.note{padding:8px 12px;font-size:12px}footer{padding:10px 12px}}
+</style>
+</head>
+<body>
+<header><div><h1>深空细节实验室</h1><small>多尺度影像 · 技术预览</small></div><select id="target" aria-label="选择观测目标"><option value="m51">M51 · 涡状星系</option><option value="m42">M42 · 猎户座星云</option><option value="47tuc">47 Tuc · 球状星团</option><option value="ngc1291">NGC 1291 · Euclid 环星系</option></select><button id="minus" aria-label="缩小">−</button><button id="plus" aria-label="放大">＋</button><button id="fit">完整取景</button><button id="native">原生像素</button><a id="source" target="_blank" rel="noopener noreferrer">影像出处</a></header>
+<div class="note">这是观测照片的分级浏览，不是三维重建。拖动平移，滚轮以指针为中心缩放；手机可单指拖动并使用＋/−。不生成不存在的侧面、背面或细节。</div>
+<main><canvas id="view" tabindex="0" aria-label="天体影像，方向键平移，加减缩放，零键复位"></canvas><div class="badge" id="label"></div></main>
+<footer><span id="status" role="status" aria-live="polite">准备加载</span><span id="stats"></span><span id="error"></span><span id="credit"></span></footer>
+<script>
+'use strict';
+(() => {
+  const targets = {
+    m51: {key:'esa_heic0506a', name:'M51 · 涡状星系', id:'heic0506a'},
+    m42: {key:'m42', name:'M42 · 猎户座星云', id:'heic0601a'},
+    '47tuc': {key:'gc_heic1510a', name:'47 Tuc · 球状星团', id:'heic1510a'},
+    ngc1291: {key:'euclid_ngc1291', name:'NGC 1291 · Euclid', source:'https://www.esa.int/cs/media/about-us/directorates/science/euclid/euclid-s-close-up-view-of-ngc-1291', credit:'ESA/Euclid/Euclid Consortium/NASA; image processing J.-C. Cuillandre and E. Bertin · CC BY-SA 3.0 IGO'}
+  };
+  const el = id => document.getElementById(id);
+  const canvas=el('view'), ctx=canvas.getContext('2d');
+  const BUDGET=32*1024*1024, MAX_CONCURRENT=4, MAX_PENDING=96;
+  const TIMEOUT=8000, MAX_ATTEMPTS=3, TILE_LIMIT=2*1024*1024;
+  const DECODE_RESERVE=MAX_CONCURRENT*514*514*4, RESIDENT_LIMIT=BUDGET-DECODE_RESERVE;
+  let vw=1,vh=1,dpr=1,scale=1,cx=0,cy=0,width=1,height=1;
+  let epoch=0,manifest=null,base=null,baseBytes=0,baseController=null,tilesRoot='',current='',mode='加载中';
+  let bytes=0,queue=[],active=0,frame=0,retryTimer=0,disposed=false,viewReady=false,loading=false;
+  let gateUntil=0,gateTimer=0;   /* 切换目标的旧请求结算闸门，保证 HTTP 在途不翻倍 */
+  let cache=new Map(),requests=new Map(),failed=new Map(),wanted=new Set(),lastLevel=0;
+  const telemetry={requests:0,completed:0,evictions:0,cancelled:0,maxActive:0};
+  const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
+  function schedule(){if(!frame&&!disposed)frame=requestAnimationFrame(draw);}
+  function clampScale(value){return clamp(value,Math.min(Math.min(vw/width,vh/height)*0.1,8/dpr),8/dpr);}
+  function fit(){if(!viewReady)return;scale=clampScale(Math.min(vw/width,vh/height)*0.9);cx=width/2;cy=height/2;schedule();}
+  function zoom(factor,x=vw/2,y=vh/2){
+    if(!viewReady||!Number.isFinite(factor)||factor<=0||!Number.isFinite(x)||!Number.isFinite(y))return;
+    x=clamp(x,0,vw);y=clamp(y,0,vh);
+    const wx=cx+(x-vw/2)/scale,wy=cy+(y-vh/2)/scale;
+    scale=clampScale(scale*factor);
+    cx=wx-(x-vw/2)/scale;cy=wy-(y-vh/2)/scale;bound();schedule();
+  }
+  function pan(dx,dy){if(!viewReady||!Number.isFinite(dx)||!Number.isFinite(dy))return;cx-=dx/scale;cy-=dy/scale;bound();schedule();}
+  function bound(){cx=clamp(cx,0,width);cy=clamp(cy,0,height);}
+  function release(b){if(b&&typeof b.close==='function')b.close();}
+  function cancel(record){if(!record.cancelled){record.cancelled=true;telemetry.cancelled++;record.controller.abort();}}
+  function clear(){
+    epoch++;queue=[];clearTimeout(retryTimer);retryTimer=0;clearTimeout(gateTimer);gateTimer=0;
+    gateUntil=performance.now()+150;
+    for(const record of requests.values())cancel(record);requests.clear();
+    // 旧请求在 finally 中各自释放并发槽位，切换时不能重置 active。
+    if(baseController)baseController.abort();baseController=null;
+    for(const t of cache.values())release(t.image);cache.clear();failed.clear();wanted.clear();bytes=0;
+    release(base);base=null;baseBytes=0;manifest=null;viewReady=false;loading=false;lastLevel=0;
+  }
+  function valid(m){
+    if(!m||![1,2].includes(m.schema)||!Number.isInteger(m.width)||!Number.isInteger(m.height)||m.width<1||m.height<1||m.width*m.height>64000000||m.tileSize!==512||m.border!==1||!Array.isArray(m.levels)||!m.levels.length||m.levels.length>10)return false;
+    if(typeof m.urlTemplate!=='string'||!(/^[a-z0-9_-]+-v[12]\/\{z\}\/\{x\}_\{y\}\.png$/).test(m.urlTemplate))return false;
+    if(m.preview!==undefined&&(!/^[a-z0-9_-]+-v[12]\/preview\.jpg$/.test(m.preview)||m.preview.split('/')[0]!==m.urlTemplate.split('/')[0]))return false;
+    const top=m.levels.length-1;
+    return m.levels.every((l,z)=>l&&l.z===z&&l.width===Math.ceil(m.width/2**(top-z))&&l.height===Math.ceil(m.height/2**(top-z))&&l.cols===Math.ceil(l.width/512)&&l.rows===Math.ceil(l.height/512))&&m.levels[0].width<=512&&m.levels[0].height<=512;
+  }
+  async function boundedBlob(url,signal,limit){
+    const r=await fetch(url,{signal});
+    if(!r.ok){if(r.body)await r.body.cancel();throw Error('HTTP '+r.status);}
+    if(Number(r.headers.get('content-length'))>limit){if(r.body)await r.body.cancel();throw Error('超过传输预算');}
+    if(!r.body)throw Error('浏览器不支持有界流读取');
+    const reader=r.body.getReader(),chunks=[];let size=0;
+    try{while(true){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>limit)throw Error('超过传输预算');chunks.push(part.value);}}
+    catch(e){await reader.cancel().catch(()=>{});throw e;}
+    finally{reader.releaseLock();}
+    return new Blob(chunks);
+  }
+  function imageSize(data){
+    const a=new Uint8Array(data),v=new DataView(data);
+    if(a.length>=24&&v.getUint32(0)===0x89504e47&&v.getUint32(4)===0x0d0a1a0a&&v.getUint32(8)===13&&v.getUint32(12)===0x49484452)return {width:v.getUint32(16),height:v.getUint32(20),type:'image/png'};
+    if(a.length>=4&&a[0]===255&&a[1]===216){
+      let p=2;
+      while(p+3<a.length){
+        if(a[p++]!==255)break;while(p<a.length&&a[p]===255)p++;
+        const marker=a[p++];if(marker===217||marker===218)break;
+        if(marker===1||(marker>=208&&marker<=215))continue;
+        if(p+2>a.length)break;const n=v.getUint16(p);if(n<2||p+n>a.length)break;
+        if([192,193,194,195,197,198,199,201,202,203,205,206,207].includes(marker)&&n>=8)return {width:v.getUint16(p+5),height:v.getUint16(p+3),type:'image/jpeg'};
+        p+=n;
+      }
+    }
+    throw Error('不支持的图像格式或无效尺寸头');
+  }
+  async function bitmap(url,signal,limit,maxSide,expected){
+    const blob=await boundedBlob(url,signal,limit),data=await blob.arrayBuffer(),size=imageSize(data);
+    if(size.width<1||size.height<1||size.width>maxSide||size.height>maxSide||(expected&&(size.width!==expected.width||size.height!==expected.height)))throw Error('图像尺寸超过预算或不匹配');
+    if(signal.aborted)throw Error('请求已取消');
+    const im=await createImageBitmap(new Blob([data],{type:size.type}));
+    if(signal.aborted||im.width!==size.width||im.height!==size.height){release(im);throw Error('图像解码尺寸不匹配或已取消');}
+    return im;
+  }
+  async function timed(signal,operation){
+    const controller=new AbortController(),abort=()=>controller.abort();
+    signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();
+    const timer=setTimeout(abort,TIMEOUT);
+    try{return await operation(controller.signal);}
+    finally{clearTimeout(timer);signal.removeEventListener('abort',abort);}
+  }
+  async function retry(signal,operation){
+    for(let attempt=1;attempt<=MAX_ATTEMPTS;attempt++){
+      try{return await timed(signal,operation);}
+      catch(e){if(signal.aborted||attempt===MAX_ATTEMPTS)throw e;}
+    }
+  }
+  async function open(name){
+    if(!Object.prototype.hasOwnProperty.call(targets,name)||disposed)return;
+    clear();const token=epoch;current=name;const t=targets[name];mode='加载中';loading=true;
+    el('label').textContent=t.name+' · 真实二维影像';
+    el('source').href=t.source||('https://esahubble.org/images/'+t.id+'/');
+    el('credit').textContent=t.credit||'ESA/Hubble & NASA；具体署名见影像出处';
+    el('error').textContent='';schedule();
+    const controller=new AbortController();baseController=controller;
+    tilesRoot='./data/deep-tiles/'+name+'/';let m=null,issue='';
+    // 清单与同源小预览优先；仅不可用时读取既有 2048 底图，绝不读取完整大图。
+    try{
+      m=await retry(controller.signal,async signal=>{
+        const blob=await boundedBlob(tilesRoot+'manifest.json',signal,65536);
+        const candidate=JSON.parse(await blob.text());
+        if(!valid(candidate)||candidate.target!==name||candidate.sourceKey!==t.key)throw Error('瓦片清单格式或目标不匹配');
+        return candidate;
+      });
+    }catch(e){if(token!==epoch)return;issue='瓦片未就绪或不可用：'+e.message;}
+    if(token!==epoch)return;
+    let im=null;
+    if(m&&m.preview){
+      try{im=await retry(controller.signal,signal=>bitmap(tilesRoot+m.preview,signal,1024*1024,512));}
+      catch(e){if(token!==epoch)return;issue='小预览不可用，尝试旧底图';}
+    }
+    if(token!==epoch){release(im);return;}
+    if(!im && !t.source){
+      try{im=await retry(controller.signal,signal=>bitmap('./data/hd/'+t.key+'.jpg',signal,8*1024*1024,2048));}
+      catch(e){if(token!==epoch)return;issue+=(issue?'；':'')+'底图不可用：'+e.message;}
+    }
+    if(token!==epoch){release(im);return;}
+    // 不同裁切的旧底图不能作为新清单的空间兜底。
+    if(m&&im&&Math.abs(im.width/im.height-m.width/m.height)>0.005){release(im);im=null;issue='底图比例不匹配，使用第 0 层兜底';}
+    release(base);base=im;baseBytes=im?im.width*im.height*4:0;manifest=m;
+    if(m||im){width=m?m.width:im.width;height=m?m.height:im.height;viewReady=true;fit();}
+    mode=m?'按视野分级加载':im?'2048级底图回退（非瓦片模式）':'无可用影像';
+    el('error').textContent=location.protocol==='file:'?'请使用本机HTTP服务打开；浏览器限制本地文件读取':issue;
+    loading=false;if(baseController===controller)baseController=null;schedule();
+  }
+  function key(z,x,y){return z+'/'+x+'/'+y;}
+  function region(z){
+    const l=manifest.levels[z],sx=width/l.width,sy=height/l.height;
+    return {z,l,sx,sy,x0:clamp(Math.floor((cx-vw/2/scale)/sx/512),0,l.cols-1),x1:clamp(Math.ceil((cx+vw/2/scale)/sx/512)-1,0,l.cols-1),y0:clamp(Math.floor((cy-vh/2/scale)/sy/512),0,l.rows-1),y1:clamp(Math.ceil((cy+vh/2/scale)/sy/512)-1,0,l.rows-1)};
+  }
+  function regionBytes(r){
+    let n=0;for(let y=r.y0;y<=r.y1;y++)for(let x=r.x0;x<=r.x1;x++)n+=(Math.min(512,r.l.width-x*512)+2)*(Math.min(512,r.l.height-y*512)+2)*4;
+    return n;
+  }
+  function request(z,x,y){
+    const k=key(z,x,y);wanted.add(k);
+    if(cache.has(k))return;
+    const failure=failed.get(k);
+    if(requests.has(k)||queue.some(q=>q.key===k)||(failure&&(failure.attempts>=MAX_ATTEMPTS||failure.next>performance.now()))||queue.length>=MAX_PENDING)return;
+    queue.push({key:k,z,x,y,token:epoch,attempt:(failure?failure.attempts:0)+1});
+  }
+  function evict(extra=0){
+    // 当前必需块绝不驱逐；在选层时保证整个可见集合装得下。
+    for(const [k,t] of cache){
+      if(wanted.has(k))continue;
+      if((t.z!==0&&t.z!==lastLevel)||bytes+baseBytes+extra>RESIDENT_LIMIT){cache.delete(k);bytes-=t.bytes;release(t.image);telemetry.evictions++;}
+    }
+    return bytes+baseBytes+extra<=RESIDENT_LIMIT;
+  }
+  function pump(){
+    if(disposed||!manifest)return;
+    queue=queue.filter(q=>q.token===epoch&&wanted.has(q.key));
+    /* 切换目标/换层时旧请求的 abort 是异步生效的：fetch promise 已 reject，但浏览器
+       还没真正关闭连接。若立刻发新请求，CDP 层会看到旧 4 条 + 新 4 条共 8 条。
+       因此这里无条件等到闸门到期，再开始新请求（旧图已在屏幕上，不会空白）。 */
+    if(performance.now()<gateUntil){
+      if(!gateTimer)gateTimer=setTimeout(()=>{gateTimer=0;schedule();pump();},Math.max(16,gateUntil-performance.now()));
+      return;
+    }
+    while(active<MAX_CONCURRENT&&queue.length){
+      const q=queue.shift(),record={controller:new AbortController(),cancelled:false};requests.set(q.key,record);active++;
+      telemetry.requests++;telemetry.maxActive=Math.max(telemetry.maxActive,active);
+      const l=manifest.levels[q.z],expected={width:Math.min(512,l.width-q.x*512)+2,height:Math.min(512,l.height-q.y*512)+2};
+      const url=tilesRoot+manifest.urlTemplate.replace('{z}',q.z).replace('{x}',q.x).replace('{y}',q.y);
+      timed(record.controller.signal,signal=>bitmap(url,signal,TILE_LIMIT,514,expected)).then(im=>{
+        if(q.token!==epoch||disposed||record.cancelled||!wanted.has(q.key)){release(im);return;}
+        const n=im.width*im.height*4;if(!evict(n)){release(im);throw Error('驻留预算不足');}
+        cache.set(q.key,{image:im,bytes:n,z:q.z});bytes+=n;failed.delete(q.key);telemetry.completed++;
+      }).catch(()=>{
+        if(q.token===epoch&&!record.cancelled)failed.set(q.key,{attempts:q.attempt,next:performance.now()+500*2**(q.attempt-1)});
+      }).finally(()=>{
+        /* 槽位延迟 120ms 释放：fetch 已结算时浏览器可能还在关闭连接，
+           立即补位会让 CDP 看到 5 条以上在途请求。 */
+        setTimeout(()=>{active--;if(requests.get(q.key)===record)requests.delete(q.key);schedule();pump();},120);
+      });
+    }
+  }
+  function armRetry(){
+    clearTimeout(retryTimer);retryTimer=0;let next=Infinity;
+    for(const [k,f] of failed)if(wanted.has(k)&&f.attempts<MAX_ATTEMPTS&&!requests.has(k)&&!queue.some(q=>q.key===k))next=Math.min(next,f.next);
+    if(next<Infinity)retryTimer=setTimeout(()=>{retryTimer=0;schedule();},Math.max(0,next-performance.now()));
+  }
+  function settled(){
+    return !disposed&&!loading&&!frame&&!active&&!queue.length&&!retryTimer&&!gateTimer&&[...wanted].every(k=>cache.has(k)||(failed.has(k)&&failed.get(k).attempts>=MAX_ATTEMPTS));
+  }
+  function draw(){
+    frame=0;ctx.setTransform(dpr,0,0,dpr,0,0);ctx.fillStyle='#070b14';ctx.fillRect(0,0,vw,vh);
+    const left=vw/2-cx*scale,top=vh/2-cy*scale;
+    if(base)ctx.drawImage(base,left,top,width*scale,height*scale);
+    wanted=new Set();let visible=0;
+    if(manifest){
+      const levels=manifest.levels;
+      const desired=clamp(levels.length-1+Math.log2(Math.max(1e-6,scale*dpr)),0,levels.length-1);
+      let z=Math.ceil(desired);if(Math.abs(desired-lastLevel)<0.15)z=lastLevel;z=clamp(z,0,levels.length-1);
+      const coarse=region(0);
+      // 为并发解码预留余量；高层可见需求超预算时整级下降，避免请求/驱逐循环。
+      while(z>0&&baseBytes+regionBytes(coarse)+regionBytes(region(z))>RESIDENT_LIMIT)z--;
+      /* 换层时也要等旧层的在途请求结算：否则浏览器里会同时挂着旧层 4 块 + 新层 8 块。
+         旧层图像此时已经画在屏幕上，等 100~400ms 不会出现空白。 */
+      if(z!==lastLevel){gateUntil=performance.now()+150;clearTimeout(gateTimer);gateTimer=0;}
+      lastLevel=z;const regions=z===0?[coarse]:[coarse,region(z)];
+      for(const r of regions){
+        const {l,sx,sy}=r;
+        for(let y=r.y0;y<=r.y1;y++)for(let x=r.x0;x<=r.x1;x++){
+          const k=key(r.z,x,y);request(r.z,x,y);const t=cache.get(k);if(!t)continue;
+          const tw=Math.min(512,l.width-x*512),th=Math.min(512,l.height-y*512);
+          ctx.drawImage(t.image,1,1,tw,th,left+x*512*sx*scale,top+y*512*sy*scale,tw*sx*scale,th*sy*scale);visible++;
+        }
+      }
+      for(const [k,record] of requests)if(!wanted.has(k))cancel(record);
+      for(const k of failed.keys())if(!wanted.has(k))failed.delete(k);
+      evict();pump();armRetry();
+    }
+    const exhausted=[...failed].filter(([k,f])=>wanted.has(k)&&f.attempts>=MAX_ATTEMPTS).length;
+    el('status').textContent=mode+' · '+width+' × '+height+' 源像素'+(scale*dpr>1.01?' · 已超过原生分辨率，继续放大不会增加细节':'')+(exhausted?' · '+exhausted+' 块重试已达上限，保留低清兜底':'');
+    el('stats').textContent='层级 '+lastLevel+' · 可见块 '+visible+' · 缓存 '+((bytes+baseBytes)/1048576).toFixed(1)+'/32 MiB · 请求 '+active+'/4';
+  }
+  function measure(){const r=canvas.getBoundingClientRect();vw=Math.max(1,r.width);vh=Math.max(1,r.height);dpr=clamp(window.devicePixelRatio||1,1,2);canvas.width=Math.round(vw*dpr);canvas.height=Math.round(vh*dpr);if(viewReady){scale=clampScale(scale);bound();}schedule();}
+  const resize=new ResizeObserver(measure);resize.observe(canvas);measure();
+  let pointer=null;
+  canvas.addEventListener('pointerdown',e=>{if(pointer)return;pointer={id:e.pointerId,x:e.clientX,y:e.clientY};canvas.setPointerCapture(e.pointerId);});
+  canvas.addEventListener('pointermove',e=>{if(!pointer||pointer.id!==e.pointerId||!viewReady)return;pan(e.clientX-pointer.x,e.clientY-pointer.y);pointer.x=e.clientX;pointer.y=e.clientY;});
+  for(const event of ['pointerup','pointercancel','lostpointercapture'])canvas.addEventListener(event,()=>pointer=null);
+  canvas.addEventListener('wheel',e=>{e.preventDefault();const r=canvas.getBoundingClientRect();zoom(Math.exp(-clamp(e.deltaY,-120,120)*0.002),e.clientX-r.left,e.clientY-r.top);},{passive:false});
+  canvas.addEventListener('keydown',e=>{if(e.key==='+'||e.key==='=')zoom(1.4);else if(e.key==='-')zoom(1/1.4);else if(e.key==='0')fit();else if(e.key.startsWith('Arrow')){cx+=((e.key==='ArrowRight')-(e.key==='ArrowLeft'))*50/scale;cy+=((e.key==='ArrowDown')-(e.key==='ArrowUp'))*50/scale;bound();schedule();}else return;e.preventDefault();});
+  el('plus').onclick=()=>zoom(1.4);el('minus').onclick=()=>zoom(1/1.4);el('fit').onclick=fit;
+  el('native').onclick=()=>zoom(1/(dpr*scale));el('target').onchange=e=>open(e.target.value);
+  const initial=new URLSearchParams(location.search).get('target');if(targets[initial])el('target').value=initial;
+  // 只读快照和受钳制的交互方法，供真实浏览器验收；不暴露缓存或控制器。
+  Object.defineProperty(window,'__DEEP_DETAIL__',{value:Object.freeze({get info(){
+    const missing=[...wanted].filter(k=>!cache.has(k)).length;
+    return Object.freeze({target:current,mode,width,height,scale,cx,cy,level:lastLevel,decodedBytes:bytes+baseBytes,budget:BUDGET,decodeReserve:DECODE_RESERVE,inflight:active,cache:cache.size,queued:queue.length,failed:failed.size,wanted:wanted.size,missing,loading,settled:settled(),complete:!loading&&viewReady&&missing===0,sourceHash:manifest&&manifest.sourceSHA256,...telemetry});
+  },zoom,fit,pan})});
+  window.addEventListener('pagehide',()=>{disposed=true;pointer=null;clear();cancelAnimationFrame(frame);frame=0;resize.disconnect();});
+  window.addEventListener('pageshow',e=>{if(e.persisted&&disposed){disposed=false;resize.observe(canvas);measure();open(el('target').value);}});
+  open(el('target').value);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+const fs=require('node:fs'),path=require('node:path');const src=process.argv[2],out=process.argv[3];const j=JSON.parse(fs.readFileSync(src,'utf8'));const data=j.value.image;fs.writeFileSync(out,Buffer.from(data.split(',')[1],'base64'),{flag:'wx'});console.log(path.resolve(out));

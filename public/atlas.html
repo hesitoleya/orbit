@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>星图 · 42.5 亿像素</title>
+<style>
+  :root{
+    --bg:#04070b; --fg:#dcecf2; --dim:#5d7784; --acc:#5eead4; --warn:#f0b060;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--fg);
+    font:13px/1.5 -apple-system,"Segoe UI",system-ui,"PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased}
+  #cv{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:grab;touch-action:none}
+  #cv.drag{cursor:grabbing}
+
+  .panel{position:fixed;z-index:10;border:1px solid rgba(158,205,215,.13);border-radius:12px;
+    background:linear-gradient(160deg,rgba(12,20,28,.82),rgba(4,8,12,.72));
+    -webkit-backdrop-filter:blur(16px) saturate(120%);backdrop-filter:blur(16px) saturate(120%);
+    box-shadow:0 12px 40px rgba(0,0,0,.45)}
+
+  #hud{left:18px;bottom:18px;padding:12px 16px 11px;min-width:268px;user-select:none}
+  #hud .row{display:flex;justify-content:space-between;gap:14px;font-size:11px;color:var(--dim);
+    letter-spacing:.02em;line-height:1.9}
+  #hud .row b{color:#cfe6ee;font-weight:500;font-variant-numeric:tabular-nums}
+  #hud .big{display:flex;align-items:baseline;gap:7px;margin:2px 0 6px}
+  #hud .big b{font-size:25px;font-weight:600;color:#f2fbfd;font-variant-numeric:tabular-nums;
+    letter-spacing:-.01em}
+  #hud .big i{font-style:normal;font-size:11px;color:var(--dim)}
+  #hud .bar{height:2px;border-radius:2px;background:rgba(158,205,215,.12);margin:7px 0 9px;position:relative}
+  #hud .bar .mk{position:absolute;top:-3px;width:2px;height:8px;background:var(--acc);border-radius:1px;
+    box-shadow:0 0 7px rgba(94,234,212,.85)}
+
+  #title{left:18px;top:18px;padding:11px 16px 10px;max-width:330px}
+  #title h1{margin:0;font-size:14px;font-weight:600;letter-spacing:.06em}
+  #title p{margin:5px 0 0;font-size:11px;color:var(--dim);line-height:1.65}
+  #title em{font-style:normal;color:var(--acc)}
+
+  #mini{right:18px;top:18px;padding:8px;width:238px}
+  #mini canvas{display:block;width:222px;height:111px;border-radius:6px;background:#02050a}
+
+  #tips{right:18px;bottom:18px;padding:10px 14px;font-size:11px;color:var(--dim);line-height:1.85;
+    user-select:none;pointer-events:none}
+  #tips kbd{font:inherit;color:#a9c6d2;background:rgba(255,255,255,.07);border-radius:4px;
+    padding:0 5px;border:1px solid rgba(158,205,215,.14)}
+
+  #boot{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;
+    background:#04070b;transition:opacity .5s;flex-direction:column;gap:12px}
+  #boot .t{font-size:12px;letter-spacing:.28em;color:#5d7784}
+  #boot .p{width:210px;height:2px;background:rgba(158,205,215,.12);border-radius:2px;overflow:hidden}
+  #boot .p i{display:block;height:100%;width:0;background:var(--acc);transition:width .3s}
+  #boot.hide{opacity:0;pointer-events:none}
+
+  #err{position:fixed;inset:0;z-index:70;display:none;align-items:center;justify-content:center;
+    background:rgba(4,7,11,.96);padding:28px}
+  #err div{max-width:520px;font-size:12.5px;line-height:1.9;color:#c6dae2}
+  #err h2{margin:0 0 10px;font-size:15px;color:var(--warn)}
+  #err code{background:rgba(255,255,255,.07);padding:1px 6px;border-radius:4px;color:#9fe8dc}
+
+  #spy{position:fixed;left:50%;top:18px;transform:translateX(-50%);z-index:11;
+    padding:6px 14px;border-radius:20px;font-size:11px;color:#cfe6ee;
+    background:rgba(8,16,22,.8);border:1px solid rgba(158,205,215,.16);display:none}
+  #spy b{color:var(--acc);font-weight:500}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div class="panel" id="title">
+  <h1>星 图 · 全天深空</h1>
+  <p>银道坐标等距圆柱投影 · 虚拟画布 <em id="vpix">—</em><br>
+     恒星按真实星表 + 分形视场生成，星系按真实坐标与角径贴真实照片。</p>
+</div>
+
+<div class="panel" id="hud">
+  <div class="row"><span>缩放</span><b id="hZoom">1 : 1</b></div>
+  <div class="big"><b id="hFov">180</b><i>° 视场高度</i></div>
+  <div class="bar"><div class="mk" id="hMark" style="left:0%"></div></div>
+  <div class="row"><span>分辨率</span><b id="hRes">—</b></div>
+  <div class="row"><span>视场星点</span><b id="hStars">—</b></div>
+  <div class="row"><span>帧率</span><b id="hFps">—</b></div>
+</div>
+
+<div class="panel" id="mini"><canvas id="mcv" width="444" height="222"></canvas></div>
+
+<div id="spy"></div>
+
+<div class="panel" id="tips">
+  <kbd>拖拽</kbd> 平移 · <kbd>滚轮</kbd> 缩放 · <kbd>双击</kbd> 放大<br>
+  <kbd>R</kbd> 复位 · <kbd>G</kbd> 跳银河系中心 · <kbd>M</kbd> 跳 M31
+</div>
+
+<div id="boot"><div class="t">正在生成星图</div><div class="p"><i id="bootBar"></i></div></div>
+
+<div id="err"><div>
+  <h2>需要通过本地服务打开</h2>
+  <p>星图要按需读取上千张真实星系照片，直接双击（<code>file://</code>）会被浏览器的跨域策略拦住。</p>
+  <p>在项目目录执行 <code>node server/server.mjs --port 8132</code>，然后访问
+     <code>http://127.0.0.1:8132/atlas.html</code>。</p>
+</div></div>
+
+<script src="data/stars_b64.js"></script>
+<script src="data/esa/atlas.js"></script>
+<script>
+(function () {
+'use strict';
+
+/* ============================================================================
+   星图 · 全天深空（对话 98）
+   ----------------------------------------------------------------------------
+   为什么要做成「虚拟画布 + 按需求值」而不是一张大图：
+   · 42.5 亿像素的位图在浏览器里根本放不下（4.2e9 × 4 B = 17 GB）。
+   · 但星空的每一个像素并不需要预先存下来 —— 恒星是点光源，位置由角度决定，
+     只要「在给定角分辨下即时求值」，画布就可以做到任意大，且放大到 1:1 时
+     每一像素都是当场算出来的，不是把一张小图放大。
+   · 于是虚拟画布定成 92160 × 46080 = 42.47 亿像素，缩放上限就是 1:1。
+   三套内容叠起来：
+     ① 银河带漫射光（分形云 + 尘埃带，离屏纹理，按银纬/银经调制）
+     ② 恒星：真实 Yale 亮星表 6250 颗（真方位）+ 分形视场（密度随银纬）
+     ③ 星系：真实赤经赤纬、真实角径，贴 ESA/Hubble 真实照片
+   ========================================================================== */
+
+const W = 92160, H = 46080;               /* 虚拟画布：42.47 亿像素 */
+const PXDEG = W / 360;                    /* 256 虚拟像素 / 度 */
+const D2R = Math.PI / 180, R2D = 180 / Math.PI;
+/* 星点密度增益：?sgain=2 之类，用于按屏幕标定「满天」的手感 */
+const SGAIN = (function () {
+  const v = parseFloat(new URLSearchParams(location.search).get('sgain') || '2.6');
+  return isFinite(v) && v > 0 ? v : 1;
+})();
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d', { alpha: false });
+
+/* ---------- 赤道坐标 → 银道坐标 ---------- */
+const NGP_RA = 192.85948 * D2R, NGP_DEC = 27.12825 * D2R, L_NCP = 122.93192 * D2R;
+function galLonLat(raDeg, decDeg) {
+  const ra = raDeg * D2R, dec = decDeg * D2R;
+  const sb = Math.sin(dec) * Math.sin(NGP_DEC) +
+             Math.cos(dec) * Math.cos(NGP_DEC) * Math.cos(ra - NGP_RA);
+  const b = Math.asin(Math.max(-1, Math.min(1, sb))) * R2D;
+  const y = Math.cos(dec) * Math.sin(ra - NGP_RA);
+  const x = Math.sin(dec) * Math.cos(NGP_DEC) -
+            Math.cos(dec) * Math.sin(NGP_DEC) * Math.cos(ra - NGP_RA);
+  let l = (L_NCP - Math.atan2(y, x)) * R2D;
+  l = ((l % 360) + 360) % 360;
+  return [l, b];
+}
+const lonToX = (l) => (l / 360) * W;
+const latToY = (b) => ((90 - b) / 180) * H;
+
+/* ---------- 视图状态 ---------- */
+const view = { x: W * 0.5, y: H * 0.5, z: 0.02, tz: 0.02 };   /* x,y 虚拟像素；z 屏幕px/虚拟px */
+let minZ = 0.004, maxZ = 1.0;
+let dpr = 1, sw = 1, sh = 1;
+
+function resize() {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  sw = innerWidth; sh = innerHeight;
+  cv.width = Math.round(sw * dpr);
+  cv.height = Math.round(sh * dpr);
+  cv.style.width = sw + 'px';
+  cv.style.height = sh + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  minZ = Math.min(sw / W, sh / H);
+  view.z = clamp(view.z, minZ, maxZ);
+  view.tz = clamp(view.tz, minZ, maxZ);
+  clampCenter();
+}
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+function clampCenter() {
+  view.x = clamp(view.x, 0, W);
+  view.y = clamp(view.y, 0, H);
+}
+
+/* ============================================================================
+   银河带漫射光：离屏纹理
+   等距圆柱投影下银道面就是一条水平带，所以用 (l, b) 直接求值最自然。
+   三层：主带（指数衰减）→ 分子云团（分形噪声）→ 尘埃带（沿银道面偏 -1.5° 的暗纹）
+   ========================================================================== */
+const BAND_W = 2048, BAND_H = 1024;
+let bandTex = null;
+
+function hash2(x, y) {
+  let h = x * 374761393 + y * 668265263;
+  h = (h ^ (h >> 13)) * 1274126177;
+  return ((h ^ (h >> 16)) >>> 0) / 4294967296;
+}
+/* 横向可周期化的值噪声：等距圆柱在 l=0 首尾相接，普通噪声在那里必然留一道竖缝
+   （实测银心正中一条硬边）。做法是让 x 格点对周期 wx 取模，
+   fbm 每层用 2 倍频并把周期同步乘 2。 */
+function vnoiseW(x, y, wx) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const x0 = ((xi % wx) + wx) % wx, x1 = ((xi + 1) % wx + wx) % wx;
+  const a = hash2(x0, yi), b = hash2(x1, yi);
+  const c = hash2(x0, yi + 1), d = hash2(x1, yi + 1);
+  return (a + (b - a) * u) * (1 - v) + (c + (d - c) * u) * v;
+}
+function fbmW(x, y, oct, wx) {
+  let s = 0, amp = 0.5, f = 1, w = Math.max(1, Math.round(wx));
+  for (let i = 0; i < oct; i++) {
+    s += vnoiseW(x * f, y * f, w) * amp;
+    amp *= 0.5; f *= 2; w *= 2;
+  }
+  return s;
+}
+/* K = 绕银经一圈的基频周期数（必须是整数，否则接缝处相位对不上） */
+function fbmK(lDeg, y, oct, K) { return fbmW(lDeg / 360 * K, y, oct, K); }
+
+function buildBand() {
+  const c = document.createElement('canvas');
+  c.width = BAND_W; c.height = BAND_H;
+  const g = c.getContext('2d');
+  const img = g.createImageData(BAND_W, BAND_H);
+  const d = img.data;
+  for (let y = 0; y < BAND_H; y++) {
+    const b = 90 - (y + 0.5) / BAND_H * 180;          /* 银纬 */
+    /* 银心方向（l≈0）最厚，反银心（l≈180）薄一半 */
+    for (let x = 0; x < BAND_W; x++) {
+      const l = (x + 0.5) / BAND_W * 360;
+      const dl = Math.min(l, 360 - l);                 /* 到银心的经度差 */
+      const coreF = 0.34 + 0.86 * Math.exp(-Math.pow(dl / 62, 2));
+      /* 主带：指数薄盘，半高约 5.5° */
+      const disc = (Math.exp(-Math.abs(b) / 8.0) + 0.34 * Math.exp(-Math.abs(b) / 22)) * coreF;
+      /* 云团：沿带调制，越近银道面越厚 */
+      const cl = fbmK(l, b * 0.22 + 7, 4, 20);
+      const cl2 = fbmK(l, b * 0.62 + 3, 3, 68);
+      const cloud = 0.22 + 2.55 * Math.pow(cl * cl2, 0.88);
+      /* 尘埃带：银道面下 1.4° 的一条暗纹，带内再分形碎裂 */
+      const dustC = Math.exp(-Math.pow((b + 1.2) / 1.7, 2));
+      const dust = 1 - 0.78 * dustC * (0.30 + 1.45 * fbmK(l, b * 0.9 + 21, 3, 50));
+      /* 大暗隙：真实银河最醒目的特征，一条从天鹅座一直裂到人马座的暗带，
+         集中在 l≈0~60、b≈-1~+2。只压亮度、不加噪声的话会像一条直线，
+         所以边缘再用一层 fbm 打碎。 */
+      const riftL = Math.exp(-Math.pow((((l + 180) % 360) - 180 + 20) / 58, 2));
+      const rift = Math.exp(-Math.pow((b + 0.9) / 1.35, 2)) * riftL *
+                   (0.55 + 0.75 * fbmK(l, b * 2.2 + 33, 3, 96));
+      const dustRift = 1 - 0.80 * Math.min(1, rift);
+      /* 少量电离氢区（淡红），沿带零星分布 */
+      const hii = Math.pow(Math.max(0, fbmK(l, b * 0.8 + 61, 2, 119) - 0.52) * 2.1, 1.6);
+      let a = disc * cloud * dust * dustRift;
+      a = Math.max(0, Math.min(2.3, a));
+      const o = (y * BAND_W + x) * 4;
+      /* 冷色外圈 → 暖白核心（银道面附近偏黄：年老恒星 + 尘埃红化） */
+      const warmF = Math.exp(-Math.abs(b) / 3.4);
+      const cr = 128 + 127 * warmF, cg = 148 + 84 * warmF, cb2 = 220 - 24 * warmF;
+      d[o]     = Math.min(255, cr * a + 168 * hii);
+      d[o + 1] = Math.min(255, cg * a + 74 * hii);
+      d[o + 2] = Math.min(255, cb2 * a + 96 * hii);
+      d[o + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  bandTex = c;
+}
+
+/* ============================================================================
+   真实星表 6250 颗 → 银道坐标
+   ========================================================================== */
+const realStars = [];
+function buildRealStars() {
+  const b64 = window.STAR_B64 || '';
+  if (!b64) return;
+  const bin = atob(b64);
+  const n = Math.floor(bin.length / 6);
+  const u8 = new Uint8Array(n * 6);
+  for (let i = 0; i < u8.length; i++) u8[i] = bin.charCodeAt(i);
+  for (let i = 0; i < n; i++) {
+    const ra = ((u8[i * 6] << 8 | u8[i * 6 + 1]) / 65535) * 360;
+    const dec = ((u8[i * 6 + 2] << 8 | u8[i * 6 + 3]) / 65535) * 180 - 90;
+    const mag = u8[i * 6 + 4] / 255 * 8.7 - 1.5;
+    const bvRaw = u8[i * 6 + 5] > 127 ? u8[i * 6 + 5] - 256 : u8[i * 6 + 5];
+    const bv = (bvRaw + 128) / 255 * 2.6 - 0.4;
+    const ll = galLonLat(ra, dec);
+    realStars.push({ l: ll[0], b: ll[1], mag: mag, ci: bvColorIdx(bv) });
+  }
+}
+/* B-V → 屏幕颜色（预先算成 24 档字符串，逐帧不要再拼字符串） */
+const BVPAL = [];
+(function () {
+  for (let i = 0; i < 24; i++) BVPAL.push(bvColorRaw(-0.4 + (i / 23) * 2.4));
+})();
+function bvColorIdx(bv) {
+  return Math.round(clamp((bv + 0.4) / 2.4, 0, 1) * 23);
+}
+function bvColor(bv) { return BVPAL[bvColorIdx(bv)]; }
+function bvColorRaw(bv) {
+  const S = [
+    [-0.40, 155, 178, 255], [-0.15, 190, 210, 255], [0.00, 224, 232, 255],
+    [0.30, 255, 248, 238], [0.58, 255, 238, 210], [0.90, 255, 216, 176],
+    [1.35, 255, 192, 146], [2.00, 255, 168, 124]
+  ];
+  let k = 0;
+  while (k < S.length - 2 && bv > S[k + 1][0]) k++;
+  const a = S[k], c = S[k + 1];
+  const t = clamp((bv - a[0]) / (c[0] - a[0]), 0, 1);
+  return 'rgb(' + Math.round(a[1] + (c[1] - a[1]) * t) + ',' +
+                  Math.round(a[2] + (c[2] - a[2]) * t) + ',' +
+                  Math.round(a[3] + (c[3] - a[3]) * t) + ')';
+}
+
+/* ============================================================================
+   星系：真实坐标 + 真实角径 + ESA/Hubble 照片
+   ========================================================================== */
+let GAL = [];
+const imgCache = new Map();              /* id → HTMLImageElement */
+const imgState = new Map();              /* id → 0 未加载 / 1 加载中 / 2 就绪 / -1 失败 */
+function ensureImg(g) {
+  const st = imgState.get(g.id) || 0;
+  if (st !== 0) return;
+  imgState.set(g.id, 1);
+  const im = new Image();
+  im.decoding = 'async';
+  im.onload = () => { imgState.set(g.id, 2); };
+  im.onerror = () => { imgState.set(g.id, -1); };
+  im.src = g.file;
+  imgCache.set(g.id, im);
+}
+
+/* 星系光点精灵：64² 径向渐变，只建一次 */
+const glowSprite = (function () {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grd.addColorStop(0, 'rgba(255,242,222,.95)');
+  grd.addColorStop(0.22, 'rgba(236,232,240,.55)');
+  grd.addColorStop(0.55, 'rgba(160,186,225,.20)');
+  grd.addColorStop(1, 'rgba(90,130,190,0)');
+  g.fillStyle = grd;
+  g.fillRect(0, 0, 64, 64);
+  return c;
+})();
+
+/* ============================================================================
+   绘制
+   ========================================================================== */
+let lastT = performance.now(), fps = 60;
+let starsDrawn = 0;
+let dirty = true;                 /* 交互/换档后置真，驱动一帧重绘 */
+
+const PERF = { band: 0, stars: 0, gal: 0, total: 0 };
+window.__AP = PERF;
+
+function draw(now) {
+  const dt = now - lastT; lastT = now;
+  const tAll = performance.now();
+  fps += (1000 / Math.max(1, dt) - fps) * 0.1;
+
+  /* 平滑缩放 */
+  view.z += (view.tz - view.z) * 0.22;
+  if (Math.abs(view.tz - view.z) < 1e-6) view.z = view.tz;
+  /* 没有任何变化时直接跳过重绘（静止画面不必每秒烧 60 次全屏合成） */
+  const moving = Math.abs(view.tz - view.z) > 1e-5 || drag !== null;
+  if (!moving && !dirty) { requestAnimationFrame(draw); return; }
+  dirty = false;
+
+  const z = view.z;
+  const halfW = sw / (2 * z), halfH = sh / (2 * z);
+  const x0 = view.x - halfW, x1 = view.x + halfW;
+  const y0 = view.y - halfH, y1 = view.y + halfH;
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#03060a';
+  ctx.fillRect(0, 0, sw, sh);
+
+  /* ---- ① 银河带 ---- */
+  const tBand = performance.now();
+  if (bandTex) {
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.imageSmoothingEnabled = true;
+    /* 等距圆柱是横向周期的：视野跨过银经 0° 时必须把带子按整张宽度再画一份，
+       否则 l<0 那一半会是纯黑（实测左半屏直接消失）。 */
+    const bh = (halfH * 2 / H) * BAND_H;
+    const by = (y0 / H) * BAND_H;
+    const wDest = W * z;
+    const kStart = Math.floor(x0 / W), kEnd = Math.floor(x1 / W);
+    for (let k = kStart; k <= kEnd; k++) {
+      const sxd = (k * W - x0) * z;
+      ctx.drawImage(bandTex, 0, by, BAND_W, bh, sxd, 0, wDest, sh);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  PERF.band = performance.now() - tBand;
+
+  /* ---- ② 分形视场恒星 ---- */
+  const tStars = performance.now();
+  /* 格子尺寸取 2 的幂，屏幕上是 24~48 px；换档时不会跳变（离散步进） */
+  const k = clamp(Math.ceil(Math.log2(1 / z)), 0, 14);
+  const cellDeg = 0.09375 * Math.pow(2, k);
+  const cellPx = cellDeg * PXDEG * z;
+  const scale = Math.pow(cellDeg / 0.09375, 2);
+  const i0 = Math.floor((x0 / W) * (360 / cellDeg)) - 1;
+  const i1 = Math.ceil((x1 / W) * (360 / cellDeg)) + 1;
+  const j0 = Math.floor((y0 / H) * (180 / cellDeg)) - 1;
+  const j1 = Math.ceil((y1 / H) * (180 / cellDeg)) + 1;
+
+  /* 按亮度分 5 桶批量画，减少 fillStyle 切换 */
+  const buckets = [[], [], [], [], []];
+  const NB = 26;                     /* 每格上限；带内密、带外稀靠数量对比 */
+  let drawn = 0;
+  const maxCells = 26000;            /* 兜底：屏幕外的极端情况 */
+  for (let j = j0; j <= j1; j++) {
+    const b = 90 - (j + 0.5) * cellDeg;
+    if (b < -90 || b > 90) continue;
+    const bandF = Math.exp(-Math.abs(b) / 9.5);
+    const rowF = 0.25 + 1.45 * bandF;
+    for (let i = i0; i <= i1; i++) {
+      if (drawn > maxCells) break;
+      let l = (i + 0.5) * cellDeg;
+      l = ((l % 360) + 360) % 360;
+      const dl = Math.min(l, 360 - l);
+      const coreF = 0.55 + 0.9 * Math.exp(-Math.pow(dl / 55, 2));
+      const dens = rowF * coreF;
+      const h = hash2(i, j);
+      /* 每格「期望星数」。关键：先把密度归一化到 0~1 再乘上限 ——
+         直接乘面积放大（scale）会让带内带外都撞上限，对比被抹平，
+         全天变成一片均匀的胡椒面（实测过）。
+         归一化后：银道面 ≈ 10 颗/格，银极 ≈ 0.4 颗/格，数量本身产生对比。 */
+      const dnorm = clamp(dens / 2.4, 0, 1);
+      /* 0.55 的底噪：真实天空到处都有暗星，纯按密度给量会把银极留成死黑 */
+      const expect = (0.55 + NB * Math.pow(dnorm, 1.15)) * SGAIN;
+      const base = Math.floor(expect);
+      const cnt = base + (h < expect - base ? 1 : 0);
+      if (cnt <= 0) continue;
+      /* 亮度也跟密度轻微挂钩，但幅度小（主要靠数量差异） */
+      const densLum = 0.72 + 0.46 * dnorm;
+      for (let s = 0; s < cnt; s++) {
+        const hs = hash2(i * 7919 + s * 131, j * 6271 + s * 977);
+        const hs2 = hash2(i * 4241 + s * 613, j * 3371 + s * 271);
+        /* 屏幕坐标：l 必须先归一到 0~360 再投影，否则跨 0° 的格子全被裁掉。
+           位置抖动放到 (-0.6, 1.6) 个格宽：允许点落到相邻格里，
+           否则「每格一颗」会形成肉眼可见的晶格（实测密集区有明显的横竖条带）。 */
+        const jx = hs * 2.2 - 0.6, jy = hs2 * 2.2 - 0.6;
+        let ll = ((i + jx) * cellDeg) % 360;
+        if (ll < 0) ll += 360;
+        let sx = (ll / 360) * W * z - x0 * z;
+        const sy = ((90 - (b - jy * cellDeg)) / 180) * H * z - y0 * z;
+        /* 横向环绕：同一条星在 l 与 l+360 上各有一个副本，取离屏幕近的那个 */
+        if (sx < -cellPx) sx += W * z;
+        else if (sx > sw + cellPx) sx -= W * z;
+        if (sx < -4 || sx > sw + 4 || sy < -4 || sy > sh + 4) continue;
+        /* 亮度：幂律，暗星远多于亮星；粗档补偿面积 */
+        const p = hash2(i * 131 + s * 17, j * 197 + s * 83);
+        const lum = Math.pow(p, 3.1);
+        const I = (0.16 + lum * 1.45) * densLum;
+        const bucket = I > 1.45 ? 4 : (I > 1.0 ? 3 : (I > 0.66 ? 2 : (I > 0.40 ? 1 : 0)));
+        const size = bucket >= 4 ? 2.1 : (bucket === 3 ? 1.6 : (bucket === 2 ? 1.15 : 1.0));
+        buckets[bucket].push(sx, sy, size);
+        drawn++;
+      }
+    }
+  }
+  const BC = ['rgba(150,175,215,', 'rgba(196,214,240,', 'rgba(226,236,250,',
+              'rgba(248,248,255,', 'rgba(255,252,246,'];
+  const BA = [0.30, 0.48, 0.68, 0.86, 1.0];
+  for (let bkt = 0; bkt < 5; bkt++) {
+    const arr = buckets[bkt];
+    if (!arr.length) continue;
+    ctx.fillStyle = BC[bkt] + BA[bkt] + ')';
+    for (let n = 0; n < arr.length; n += 3) {
+      ctx.fillRect(arr[n], arr[n + 1], arr[n + 2], arr[n + 2]);
+    }
+  }
+
+  /* ---- ③ 真实亮星（叠在上面，带真实星等与色指数） ---- */
+  const st = realStars;
+  for (let n = 0; n < st.length; n++) {
+    const s = st[n];
+    if (s.b < -91 || s.b > 91) continue;
+    let sx = (lonToX(s.l) - x0) * z;
+    const sy = (latToY(s.b) - y0) * z;
+    if (sx < -6) sx += W * z; else if (sx > sw + 6) sx -= W * z;
+    if (sx < -6 || sx > sw + 6 || sy < -6 || sy > sh + 6) continue;
+    const m = s.mag;
+    const size = clamp(3.6 - m * 0.42, 1.0, 5.2) * (z > 0.25 ? 1.25 : 1);
+    const a = clamp(1.15 - m * 0.10, 0.16, 1);
+    ctx.fillStyle = BVPAL[s.ci];
+    ctx.globalAlpha = a;
+    ctx.fillRect(sx - size * 0.5, sy - size * 0.5, size, size);
+    if (m < 1.6) {                     /* 亮星给一点点光晕 */
+      ctx.globalAlpha = a * 0.13;
+      ctx.fillRect(sx - size * 1.7, sy - size * 1.7, size * 3.4, size * 3.4);
+    }
+    drawn++;
+  }
+  ctx.globalAlpha = 1;
+
+  PERF.stars = performance.now() - tStars;
+
+  /* ---- ④ 星系照片 ---- */
+  const tGal = performance.now();
+  const labels = [];
+  for (let n = 0; n < GAL.length; n++) {
+    const g = GAL[n];
+    const cx = lonToX(g.l), cy = latToY(g.b);
+    const sizeV = g.size * PXDEG;                 /* 虚拟像素 */
+    const sizeS = sizeV * z;                       /* 屏幕像素 */
+    let sx = (cx - x0) * z;
+    const sy = (cy - y0) * z;
+    if (sx < -sw) sx += W * z; else if (sx > sw * 2) sx -= W * z;
+    if (sx < -sizeS * 1.6 - 20 || sx > sw + sizeS * 1.6 + 20) continue;
+    if (sy < -sizeS * 1.6 - 20 || sy > sh + sizeS * 1.6 + 20) continue;
+
+    /* 太小时画一个发光点，避免为几个像素去解码 1280² 的 JPEG。
+       径向渐变每帧新建是纯浪费（实测这是 12 fps 的主因之一），改预渲染精灵。 */
+    if (sizeS < 9) {
+      const r = Math.max(5, sizeS * 2.2);
+      ctx.drawImage(glowSprite, sx - r, sy - r, r * 2, r * 2);
+      continue;
+    }
+    ensureImg(g);
+    const im = imgCache.get(g.id);
+    if ((imgState.get(g.id) || 0) === 2 && im.complete && im.naturalWidth) {
+      const drawW = sizeS, drawH = sizeS * (im.naturalHeight / im.naturalWidth);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.drawImage(im, sx - drawW / 2, sy - drawH / 2, drawW, drawH);
+      ctx.globalCompositeOperation = 'source-over';
+    } else {
+      const r = sizeS * 0.5;
+      ctx.fillStyle = 'rgba(180,200,240,.20)';
+      ctx.beginPath(); ctx.arc(sx, sy, r, 0, 6.2832); ctx.fill();
+    }
+    if (sizeS > 26 || z > 0.32) labels.push([sx, sy, sizeS, g.name]);
+  }
+
+  /* ---- ⑤ 标注 ---- */
+  if (labels.length) {
+    ctx.font = '11px -apple-system,"Segoe UI",system-ui,"PingFang SC",sans-serif';
+    ctx.textAlign = 'center';
+    for (let n = 0; n < labels.length; n++) {
+      const [sx, sy, sz, nm] = labels[n];
+      const ty = sy - Math.min(sz * 0.55, 60) - 8;
+      ctx.fillStyle = 'rgba(0,0,0,.55)';
+      const w = ctx.measureText(nm).width + 10;
+      ctx.fillRect(sx - w / 2, ty - 10, w, 15);
+      ctx.fillStyle = 'rgba(214,236,244,.92)';
+      ctx.fillText(nm, sx, ty);
+    }
+  }
+
+  PERF.gal = performance.now() - tGal;
+  PERF.total = performance.now() - tAll;
+  starsDrawn = drawn;
+  updateHUD(z, drawn);
+  drawMini(x0, y0, halfW, halfH);
+  requestAnimationFrame(draw);
+}
+
+/* ============================================================================
+   HUD / 缩略图
+   ========================================================================== */
+const elZoom = document.getElementById('hZoom');
+const elFov = document.getElementById('hFov');
+const elRes = document.getElementById('hRes');
+const elStars = document.getElementById('hStars');
+const elFps = document.getElementById('hFps');
+const elMark = document.getElementById('hMark');
+const elVpix = document.getElementById('vpix');
+
+let hudTick = 0;
+function updateHUD(z, drawn) {
+  if (hudTick++ % 6) return;                 /* HUD 不必每帧刷 */
+  const fovH = sh / (PXDEG * z);
+  elFov.textContent = fovH > 100 ? fovH.toFixed(0) : (fovH > 10 ? fovH.toFixed(1) : fovH.toFixed(2));
+  const ratioPx = 1 / (PXDEG * z);            /* 每屏幕像素多少度 → 折算成「1:xxx」 */
+  elZoom.textContent = z >= 0.999 ? '1 : 1（原始像素）' : '1 : ' + Math.round(1 / z).toLocaleString();
+  const arcsec = ratioPx * 3600;
+  elRes.textContent = arcsec > 60 ? (arcsec / 60).toFixed(1) + '′ / px'
+                                  : arcsec.toFixed(1) + '″ / px';
+  elStars.textContent = drawn.toLocaleString();
+  elFps.textContent = fps.toFixed(0) + ' fps';
+  /* 缩放条：对数刻度 */
+  const t = (Math.log(z) - Math.log(minZ)) / (Math.log(maxZ) - Math.log(minZ));
+  elMark.style.left = clamp(t * 100, 0, 100).toFixed(1) + '%';
+  elVpix.textContent = (W * H / 1e8).toFixed(2) + ' 亿像素';
+}
+
+const mcv = document.getElementById('mcv');
+const mctx = mcv.getContext('2d');
+let miniBg = null;
+function buildMiniBg() {
+  const c = document.createElement('canvas');
+  c.width = 444; c.height = 222;
+  const g = c.getContext('2d');
+  g.fillStyle = '#02060b'; g.fillRect(0, 0, 444, 222);
+  if (bandTex) {
+    g.globalAlpha = 0.85;
+    g.drawImage(bandTex, 0, 0, 444, 222);
+    g.globalAlpha = 1;
+  }
+  /* 真实星点（缩略图上每个像素代表 0.81°） */
+  g.fillStyle = 'rgba(220,235,255,.5)';
+  for (let i = 0; i < realStars.length; i += 2) {
+    const s = realStars[i];
+    g.fillRect(lonToX(s.l) / W * 444, latToY(s.b) / H * 222, 1, 1);
+  }
+  /* 星系标记 */
+  g.fillStyle = 'rgba(255,214,150,.75)';
+  for (let i = 0; i < GAL.length; i++) {
+    g.fillRect(lonToX(GAL[i].l) / W * 444 - 1, latToY(GAL[i].b) / H * 222 - 1, 2, 2);
+  }
+  miniBg = c;
+}
+function drawMini(x0, y0, halfW, halfH) {
+  if (!miniBg) return;
+  mctx.drawImage(miniBg, 0, 0);
+  mctx.strokeStyle = 'rgba(94,234,212,.9)';
+  mctx.lineWidth = 1.5;
+  const rx = (x0 / W) * 444, ry = (y0 / H) * 222;
+  const rw = (halfW * 2 / W) * 444, rh = (halfH * 2 / H) * 222;
+  mctx.strokeRect(rx, ry, Math.max(3, rw), Math.max(3, rh));
+}
+
+/* ============================================================================
+   交互
+   ========================================================================== */
+let drag = null;
+cv.addEventListener('pointerdown', (e) => {
+  cv.setPointerCapture(e.pointerId);
+  drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
+  cv.classList.add('drag');
+});
+cv.addEventListener('pointermove', (e) => {
+  if (!drag) return;
+  view.x = drag.vx - (e.clientX - drag.x) / view.z;
+  view.y = drag.vy - (e.clientY - drag.y) / view.z;
+  clampCenter(); dirty = true;
+});
+cv.addEventListener('pointerup', () => { drag = null; cv.classList.remove('drag'); });
+cv.addEventListener('pointercancel', () => { drag = null; cv.classList.remove('drag'); });
+
+cv.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0016));
+}, { passive: false });
+
+cv.addEventListener('dblclick', (e) => { zoomAt(e.clientX, e.clientY, 2.2); });
+
+function zoomAt(sx, sy, factor) {
+  const nz = clamp(view.tz * factor, minZ, maxZ);
+  /* 保持光标下的点不动 */
+  const wx = view.x + (sx - sw / 2) / view.z;
+  const wy = view.y + (sy - sh / 2) / view.z;
+  view.tz = nz;
+  view.x = wx - (sx - sw / 2) / nz;
+  view.y = wy - (sy - sh / 2) / nz;
+  clampCenter(); dirty = true;
+}
+
+/* 双指捏合 */
+const ptrs = new Map();
+cv.addEventListener('pointerdown', (e) => ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY }));
+cv.addEventListener('pointerup', (e) => ptrs.delete(e.pointerId));
+cv.addEventListener('pointercancel', (e) => ptrs.delete(e.pointerId));
+let pinchD = 0;
+cv.addEventListener('pointermove', (e) => {
+  if (!ptrs.has(e.pointerId)) return;
+  ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (ptrs.size !== 2) { pinchD = 0; return; }
+  const [a, b] = [...ptrs.values()];
+  const d = Math.hypot(a.x - b.x, a.y - b.y);
+  if (pinchD > 0) {
+    zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, d / pinchD);
+    drag = null;
+  }
+  pinchD = d;
+});
+
+function flyTo(l, b, targetZ, ms) {
+  const tx = lonToX(l), ty = latToY(b);
+  view.tz = clamp(targetZ, minZ, maxZ);
+  view.x = tx; view.y = ty;
+  clampCenter(); dirty = true;
+  flash('定位 · ' + l.toFixed(2) + '°, ' + b.toFixed(2) + '°');
+}
+addEventListener('keydown', (e) => {
+  const k = e.key.toLowerCase();
+  if (k === 'r') { view.x = lonToX(0); view.y = latToY(0); view.tz = minZ * 3.2; flash('复位'); }
+  if (k === 'g') flyTo(0, 0, 0.42);
+  if (k === 'm') flyTo(121.17, -21.57, 1.0);      /* M31 银道坐标 */
+  if (k === '+' || k === '=') zoomAt(sw / 2, sh / 2, 1.4);
+  if (k === '-') zoomAt(sw / 2, sh / 2, 1 / 1.4);
+});
+addEventListener('resize', resize);
+
+const spyEl = document.getElementById('spy');
+let spyT = 0;
+function flash(msg) {
+  spyEl.textContent = msg;
+  spyEl.style.display = 'block';
+  clearTimeout(spyT);
+  spyT = setTimeout(() => { spyEl.style.display = 'none'; }, 1600);
+}
+
+/* ============================================================================
+   启动
+   ========================================================================== */
+function boot() {
+  const bar = document.getElementById('bootBar');
+  const step = (p) => { bar.style.width = p + '%'; };
+  resize();
+  step(20);
+
+  if (!window.ATLAS) {
+    document.getElementById('boot').classList.add('hide');
+    document.getElementById('err').style.display = 'flex';
+    return;
+  }
+  const A = window.ATLAS;
+  /* 星系：把 RA/Dec 转成银道坐标 */
+  GAL = (A.galaxies || []).map((g) => {
+    const ll = galLonLat(g.ra, g.dec);
+    return { id: g.id, name: g.name, l: ll[0], b: ll[1], size: g.size,
+             file: A.base + g.file, type: g.type };
+  });
+
+  setTimeout(() => { step(45); buildRealStars(); }, 30);
+  setTimeout(() => {
+    step(80);
+    buildBand();
+    buildMiniBg();
+  }, 120);
+
+  setTimeout(() => {
+    step(100);
+    /* 初始视角：从银心方向进入，约 55° 视场。
+       全景（180° 视场）下银河带只有几十像素高，第一眼反而看不出「满天星辰」。 */
+    view.z = minZ * 3.2; view.tz = view.z;
+    view.x = lonToX(0); view.y = latToY(0);
+    document.getElementById('boot').classList.add('hide');
+    requestAnimationFrame(draw);
+  }, 220);
+}
+
+/* 供外部（3D 主程序）调用：打开时直接定位某个星系 */
+window.ATLAS_API = {
+  fly: (name) => {
+    const g = GAL.find((x) => x.name.indexOf(name) >= 0);
+    if (g) flyTo(g.l, g.b, 1.0);
+    return !!g;
+  },
+  info: () => ({ w: W, h: H, px: W * H, galaxies: GAL.length, stars: realStars.length })
+};
+
+boot();
+})();
+</script>
+</body>
+</html>

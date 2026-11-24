@@ -1,0 +1,37 @@
+'use strict';
+// 在内存中扩展现有隔离测试，不修改原测试或正式入口。
+const fs = require('node:fs');
+const path = require('node:path');
+const source = fs.readFileSync(path.join(__dirname, 'test-journey-hud-browser-independent.cjs'), 'utf8');
+const anchor = "        await evaluate('__SE.cosmos(1e22)');";
+if (source.split(anchor).length !== 2) throw Error('测试插入点不唯一');
+const inserted = `
+        const atlasProbe = \`(()=>{const b=document.querySelector('#atlasBtn'),s=getComputedStyle(b),r=b.getBoundingClientRect(),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);return {journey:__SE.journeyInfo.on,body:document.body.className,display:s.display,visibility:s.visibility,opacity:s.opacity,pointerEvents:s.pointerEvents,rect:{x:r.left+r.width/2,y:r.top+r.height/2,width:r.width,height:r.height},hit:hit&&(hit.closest('#atlasBtn')?'atlasBtn':hit.id||hit.tagName),active:document.activeElement.id,modal:document.querySelector('#atlasModal').classList.contains('on')}})()\`;
+        await evaluate(\`(()=>{const b=document.createElement('button');b.id='beforeJourneyFocus';document.querySelector('#ui').appendChild(b);b.focus()})()\`);
+        const focusBefore=await evaluate('document.activeElement.id');
+        await evaluate('__SE.journey()');
+        const natural=await evaluate(atlasProbe);
+        record('自然启动时清除已有 HUD 焦点', {before:focusBefore,after:natural.active,journey:natural.journey},focusBefore==='beforeJourneyFocus'&&natural.active!=='beforeJourneyFocus'&&natural.journey);
+        await new Promise(r=>setTimeout(r,1000));
+        let a=await evaluate(atlasProbe);
+        record('自然旅程中的图鉴按钮',a,a.journey&&a.visibility==='visible'&&Number(a.opacity)>0&&a.hit==='atlasBtn');
+        await evaluate(\`document.querySelector('#atlasBtn').focus()\`);
+        a=await evaluate(atlasProbe);
+        record('自然旅程中图鉴可编程聚焦',a,a.journey&&a.active==='atlasBtn');
+        for(const type of ['mousePressed','mouseReleased'])await send('Input.dispatchMouseEvent',{type,x:a.rect.x,y:a.rect.y,button:'left',clickCount:1});
+        a=await evaluate(atlasProbe);
+        record('自然旅程中图鉴真实鼠标点击',a,a.modal);
+        await evaluate(\`document.querySelector('#amClose').click();__SE.journeyStop();document.activeElement.blur()\`);
+        await evaluate('__SE.journeySeek(7.501)');
+        a=await evaluate(atlasProbe);
+        record('seek 接力后的图鉴按钮',a,a.journey&&a.visibility==='visible'&&Number(a.opacity)>0&&a.hit==='atlasBtn');
+        await evaluate(\`document.querySelector('#atlasBtn').focus()\`);
+        a=await evaluate(atlasProbe);
+        record('seek 期间图鉴可编程聚焦',a,a.journey&&a.active==='atlasBtn');
+        for(const type of ['mousePressed','mouseReleased'])await send('Input.dispatchMouseEvent',{type,x:a.rect.x,y:a.rect.y,button:'left',clickCount:1});
+        a=await evaluate(atlasProbe);
+        record('seek 期间图鉴真实鼠标点击',a,a.modal);
+        await evaluate(\`document.querySelector('#amClose').click();__SE.journeyStop();document.activeElement.blur()\`);
+`;
+const modified = source.replace('hud-browser-', 'atlas-journey-independent-').replace(anchor, inserted + anchor);
+new Function('require','__dirname','__filename','module','exports', modified)(require,__dirname,__filename,module,exports);

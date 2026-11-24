@@ -1,0 +1,1 @@
+require('fs').mkdirSync('.workbuddy/v207-quality',{recursive:true});
